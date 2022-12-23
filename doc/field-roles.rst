@@ -60,7 +60,7 @@ fields::
 
 If the content is empty, the "*reset*" action is performed::
 
-    xo_emit("{C:both,underline}{:value}{C:}\n", value);
+    xo_emit("{C:bold,underline}{:value}{C:}\n", value);
 
 The content should be a comma-separated list of zero or more colors or
 display effects::
