@@ -19,7 +19,7 @@ xo_emit call:
             linect, wordct, charct, file);
 ```
 
-Output can then be generated in various style, using the "--libxo"
+Output can then be generated in various styles, using the "--libxo"
 option: 
 
 ```
