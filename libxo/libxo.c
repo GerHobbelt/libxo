@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2019, Juniper Networks, Inc.
+ * Copyright (c) 2014-2023, Juniper Networks, Inc.
  * All rights reserved.
  * This SOFTWARE is licensed under the LICENSE provided in the
  * ../Copyright file. By downloading, installing, copying, or otherwise
@@ -46,9 +46,11 @@
 
 #include "xo_config.h"
 #include "xo.h"
+#include "xo_private.h"
 #include "xo_encoder.h"
 #include "xo_buf.h"
 #include "xo_explicit.h"
+#include "xo_filter.h"
 
 /*
  * We ask wcwidth() to do an impossible job, really.  It's supposed to
@@ -144,6 +146,7 @@ static const char xo_default_format[] = "%s";
 #ifndef LIBXO_TEXT_ONLY
 /* We don't want the overhead of tag maps when in text-only mode */
 #define LIBXO_NEED_MAP
+#define LIBXO_NEED_FILTER	/* Same for filtering */
 
 #define XO_MAP_INCR 128		/* Must be even */
 
@@ -290,6 +293,9 @@ struct xo_handle_s {
     int xo_map_len;		/* Current length (count) of xo_map[] */
     xo_buffer_t xo_map_data;	/* Data values for name mapping */
 #endif /* LIBXO_NEED_MAP */
+#ifdef LIBXO_NEED_FILTER
+    struct xo_filter_s *xo_filters; /* Opaque data pointer */
+#endif /* LIBXO_NEED_FILTER */
 };
 
 /* Flag operations */
@@ -769,6 +775,32 @@ xo_default (xo_handle_t *xop)
     }
 
     return xop;
+}
+
+/*
+ * A simple debugging print function, similar to psu_dbg.  Controlled by
+ * the undocumented "debug" option.
+ */
+void
+xo_dbg (xo_handle_t *xop UNUSED, const char *fmt UNUSED, ...)
+{
+#ifndef LIBXO_TEXT_ONLY
+    xop = xo_default(xop);
+
+    if (xop == NULL || !(xop->xo_flags & XOF_DEBUG))
+	return;
+
+    va_list vap;
+    size_t len = strlen(fmt);
+    char *new_fmt = alloca(len + 2);
+    memcpy(new_fmt, fmt, len);
+    new_fmt[len] = '\n';
+    new_fmt[len + 1] = '\0';
+
+    va_start(vap, fmt);
+    vfprintf(stderr, new_fmt, vap);
+    va_end(vap);
+#endif /* LIBXO_TEXT_ONLY */
 }
 
 /*
@@ -1572,7 +1604,7 @@ xo_retain_get_hits (void)
  * standard error.  If the XOF_WARN_XML flag is set, then we generate
  * XMLified content on standard output.
  */
-static void
+void
 xo_warn_hcv (xo_handle_t *xop, int code, int check_warn,
 	     const char *fmt, va_list vap)
 {
@@ -2168,6 +2200,7 @@ static xo_flag_mapping_t xo_xof_names[] = {
     { XOF_COLOR_ALLOWED, "color" },
     { XOF_COLOR, "color-force" },
     { XOF_COLUMNS, "columns" },
+    { XOF_DEBUG, "debug" },
     { XOF_DTRT, "dtrt" },
     { XOF_FLUSH, "flush" },
     { XOF_FLUSH_LINE, "flush-line" },
@@ -2211,10 +2244,10 @@ static xo_flag_mapping_t xo_xof_simple_names[] = {
  * Convert string name to XOF_* flag value.
  * Not all are useful.  Or safe.  Or sane.
  */
-static unsigned
+static xo_xof_flags_t
 xo_name_to_flag (const char *name)
 {
-    return (unsigned) xo_name_lookup(xo_xof_names, name, -1);
+    return xo_name_lookup(xo_xof_names, name, -1);
 }
 
 /**
@@ -2525,6 +2558,15 @@ xo_set_options (xo_handle_t *xop, const char *input)
 		    rc = xo_map_add_file(xop, vp);
 		    if (rc)
 			xo_warnx("error initializing map-file: '%s'", vp);
+		}
+
+	    } else if (xo_streq(cp, "filter")) {
+		if (vp == NULL)
+		    xo_failure(xop, "missing value for filter option");
+		else {
+		    rc = xo_filter_add(xop, vp);
+		    if (rc)
+			xo_warnx("error initializing path: '%s'", vp);
 		}
 
 	    } else {
@@ -4625,6 +4667,34 @@ xo_map_add_file (xo_handle_t *xop UNUSED, const char *fname UNUSED)
 #endif /* LIBXO_NEED_MAP */
 
     return 0;
+}
+
+void
+xo_filter_data_set (xo_handle_t *xop UNUSED, struct xo_filter_s *xfp UNUSED)
+{
+#ifdef LIBXO_NEED_FILTER
+    xop->xo_filters = xfp;
+#endif /* LIBXO_NEED_FILTER */
+}
+
+struct xo_filter_s *
+xo_filter_data_get (xo_handle_t *xop UNUSED)
+{
+#ifdef LIBXO_NEED_FILTER
+    return xop->xo_filters;
+#else /* LIBXO_NEED_FILTER */
+    return NULL;
+#endif /* LIBXO_NEED_FILTER */
+}
+
+int
+xo_filter_add (xo_handle_t *xop UNUSED, const char *vp UNUSED)
+{
+#ifdef LIBXO_NEED_FILTER
+    return xo_filter_add_one(xop, xop->xo_filters, vp);
+#else /* LIBXO_NEED_FILTER */
+    return 0;
+#endif /* LIBXO_NEED_FILTER */
 }
 
 static void
@@ -7376,6 +7446,7 @@ xo_do_open_container (xo_handle_t *xop, xo_xof_flags_t flags, const char *name)
     }
 
     name = xo_map_name(xop, name); /* Find mapped name, if any */
+    xo_filter_open_container(xop, xop->xo_filters, name);
 
     const char *leader = xo_xml_leader(xop, name);
     flags |= xop->xo_flags;	/* Pick up handle flags */
