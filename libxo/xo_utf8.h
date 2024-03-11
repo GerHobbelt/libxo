@@ -26,16 +26,9 @@
 #include <string.h>
 
 /**
- * This is like wchar_t but is signed so that errors can be returned.
- * Negative values are errors, but the decision on what to do is left
- * to the caller.
- */
-typedef int32_t xo_utf8_wchar_t;
-
-/**
  * The "length" bits in the first byte are not properly encoded
  */
-#define XO_UTF8_ERR_BAD_LEN	-1
+#define XO_UTF8_ERR_BAD_LEN	((wchar_t) -1)
 
 /**
  * The trailing bytes (non-first bytes) of the encoding are not
@@ -43,7 +36,7 @@ typedef int32_t xo_utf8_wchar_t;
  * trailing bytes may be an ASCII character, which TR-36 says we should
  * not skip.
  */
-#define XO_UTF8_ERR_TRAILING	-2
+#define XO_UTF8_ERR_TRAILING	((wchar_t) -2)
 
 /**
  * The UTF-8 representation is not the shortest form, which is
@@ -52,13 +45,34 @@ typedef int32_t xo_utf8_wchar_t;
  * non-shortest form representations allow evil-doers to circumvent
  * such rules.  See TR-36 for details.
  */
-#define XO_UTF8_ERR_NON_SHORT	-3
+#define XO_UTF8_ERR_NON_SHORT	((wchar_t) -3)
 
 /**
  * The UTF-8 representation lacks sufficient bytes and was assumably
  * truncated somewhere in transit.
  */
-#define XO_UTF8_ERR_TRUNCATED	-4
+#define XO_UTF8_ERR_TRUNCATED	((wchar_t) -4)
+
+/**
+ * We're looking at a secondary byte (second or later in a series),
+ * having missed the first byte.
+ */
+#define XO_UTF8_ERR_SECONDARY	((wchar_t) -5)
+
+/**
+ * Check if the wide character value is an error indication
+ */
+static int inline
+xo_utf8_wchar_is_err (wchar_t wc)
+{
+    return ((long) wc <= 0);
+}
+
+/**
+ * Return a text message describing the error in 'wc'
+ */
+const char *
+xo_utf8_wchar_errmsg (wchar_t wc);
 
 /*
  * strchrnul is a nice extension from glibc and FreeBSD (10), which we
@@ -135,12 +149,12 @@ xo_utf8_len_bits (int len)
 }
 
 /**
- * Inspect the fisrt byte of a UTF-8 character representation and
+ * Inspect the first byte of a UTF-8 character representation and
  * return the number of bytes in the representation, as indicated by
  * the high-order bits.
  */
 static inline int
-xo_utf8_len (char ch)
+xo_utf8_rlen (char ch)
 {
     if ((ch & 0x80) == 0x0)   /* 0xxx xxxx */
         return 1;
@@ -151,6 +165,18 @@ xo_utf8_len (char ch)
     if ((ch & 0xf8) == 0xf0)  /* 1111 0xxx */
         return 4;
     return -1;			/* Invalid non-utf8 byte */
+}
+
+/**
+ * Inspect the first byte of a UTF-8 character representation and
+ * return the number of bytes in the representation, as indicated by
+ * the high-order bits.
+ */
+static inline int
+xo_utf8_len (char ch)
+{
+    int ulen = xo_utf8_rlen(ch);
+    return (ulen <= 0) ? 1 : ulen;
 }
 
 /**
@@ -173,7 +199,7 @@ xo_utf8_to_len (wchar_t wc)
 /**
  * Emit one wide character into the given buffer.  'len' must be <= 4.
  */
-static void
+static inline void
 xo_utf8_to_bytes (char *buf, ssize_t len, wchar_t wc)
 {
     ssize_t i = 0;
@@ -231,22 +257,9 @@ xo_utf8_emit_char (char *buf, ssize_t len, wchar_t wc)
  * error is encountered.  If this value is zero, then a specific error
  * is returned, one of XO_UTF8_ERR_*.
  */
-xo_utf8_wchar_t
+wchar_t
 xo_utf8_codepoint (const char *buf, size_t bufsiz, int len,
-		   xo_utf8_wchar_t on_err);
-
-/**
- * Return the codepoint to a UTF-8 character.  See xo_utf8_codepoint
- * for detauls, but here we return a 'wchar_t', which may be more
- * usable for callers, but will lack xo_utf8_codepoint's ability to
- * return errors.  If on_err is zero, we use a space (' '), since we
- * cannot return a negative value.
- */
-static inline wchar_t
-xo_utf8_wcodepoint (const char *buf, size_t bufsiz, int len, wchar_t on_err)
-{
-    return (wchar_t) xo_utf8_codepoint(buf, bufsiz, len, on_err ?: ' ');
-}
+		   wchar_t on_err);
 
 /* --------- */
 
@@ -324,7 +337,7 @@ xo_utf8_nislower (char *str, size_t len)
 	return 0;
 
     int ulen = xo_utf8_len(*str);
-    xo_utf8_wchar_t wc = xo_utf8_codepoint(str, len, ulen, ' ');
+    wchar_t wc = xo_utf8_codepoint(str, len, ulen, ' ');
     return xo_utf8_wislower(wc);
 }
 
@@ -349,7 +362,7 @@ xo_utf8_nisupper (char *str, size_t len)
 	return 0;
 
     int ulen = xo_utf8_len(*str);
-    xo_utf8_wchar_t wc = xo_utf8_codepoint(str, len, ulen, ' ');
+    wchar_t wc = xo_utf8_codepoint(str, len, ulen, ' ');
     return xo_utf8_wisupper(wc);
 }
 
@@ -374,8 +387,8 @@ xo_utf8_nnext (char *str, size_t len)
 	return NULL;
 
     int ulen = xo_utf8_len(*str);
-    xo_utf8_wchar_t wc = xo_utf8_codepoint(str, len, ulen, 0);
-    if (wc <= 0)
+    wchar_t wc = xo_utf8_codepoint(str, len, ulen, 0);
+    if (xo_utf8_wchar_is_err(wc))
 	ulen = 1;		/* Invalid UTF-8 character */
 
     return str + ulen;
@@ -422,30 +435,30 @@ xo_utf8_prev(char *start, char *cur)
  * Convert a string to lower case.
  */
 void
-xo_utf8_nlower(char * restrict str, size_t len);
+xo_utf8_ntolower(char * restrict str, size_t len);
 
 /**
  * Convert a string to lower case.
  */
 static inline void
-xo_utf8_lower(char *str)
+xo_utf8_tolower(char *str)
 {
-    return xo_utf8_nlower(str, strlen(str));
+    return xo_utf8_ntolower(str, strlen(str));
 }
 
 /**
  * Convert a string to upper case.
  */
 void
-xo_utf8_nupper(char * str, size_t len);
+xo_utf8_ntoupper(char * str, size_t len);
 
 /**
  * Convert a string to upper case.
  */
 static inline void
-xo_utf8_upper(char *str)
+xo_utf8_toupper(char *str)
 {
-    return xo_utf8_nupper(str, strlen(str));
+    return xo_utf8_ntoupper(str, strlen(str));
 }
 
 /**
@@ -638,5 +651,17 @@ xo_ustrlcpy(char * restrict dst, const char * restrict src, size_t len);
  */
 size_t
 xo_utrunc(char *str, size_t len);
+
+/**
+ * Return the lower case version of a wide character.
+ */
+wchar_t
+xo_utf8_wtolower (wchar_t wc);
+
+/**
+ * Return the upper case version of a wide character.
+ */
+wchar_t
+xo_utf8_wtoupper (wchar_t wc);
 
 #endif /* INCLUDE_XO_UTF8_H */
