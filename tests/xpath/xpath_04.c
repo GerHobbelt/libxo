@@ -39,6 +39,30 @@ trim (char *cp)
     return cp;
 }
 
+static char *
+clean_token (char *cp)
+{
+    while (*cp && !isspace(*cp))
+	cp += 1;
+
+    if (*cp == '\0')
+	return cp;
+
+    *cp++ = '\0';
+
+    while (isspace(*cp))
+	cp += 1;
+
+    char *ep = cp + strlen(cp);
+
+    for (ep--; ep > cp && isspace(*ep); ep--)
+	continue;
+    if (++ep >= cp && (*ep == '\n' || *ep == '\r'))
+	*ep = '\0';
+
+    return cp;
+}
+
 int
 main (int argc, char **argv)
 {
@@ -68,11 +92,19 @@ main (int argc, char **argv)
 
     xo_xparse_node_t *xnp UNUSED;
 
+    FILE *fp = fopen(output, "w+");
+    if (fp == NULL)
+	xo_errx(1, "open failed");
+
+    xo_handle_t *xop = xo_create_to_file(fp, XO_STYLE_XML, XOF_PRETTY);
+    if (xop == NULL)
+	xo_errx(1, "create failed");
+
     xo_filter_t *xfp = xo_filter_create(NULL);
     if (xfp == NULL)
 	xo_errx(1, "allocation of filter failed");
 
-    xo_xparse_data_t *xdp = xo_filter_data(xfp);
+    xo_xparse_data_t *xdp = xo_filter_data(xop, xfp);
 
     xo_xparse_init(xdp);
     strncpy(xdp->xd_filename, "test", sizeof(xdp->xd_filename));
@@ -81,15 +113,8 @@ main (int argc, char **argv)
     if (in == NULL)
 	xo_err(1, "could not open file '%s'", input);
 
-    FILE *fp = output ? fopen(output, "w+") : stdout;
-    if (fp == NULL)
-	xo_err(1, "open failed for '%s'", output);
-
-    xo_handle_t *xop = xo_create_to_file(fp, XO_STYLE_XML, XOF_PRETTY);
-    if (xop == NULL)
-	xo_errx(1, "create failed");
-
     char *cp, buf[BUFSIZ];
+    char *key, *value;
     int rc;
 
     for (;;) {
@@ -98,15 +123,17 @@ main (int argc, char **argv)
 	    break;
 
 	cp = trim(cp);
-	xo_dbg(NULL, "main: got '%s'", cp ?: "");
+	fprintf(stderr, "main: input '%s'\n", cp ?: "");
 
 	switch (*cp) {
 	case '#':
+	case ' ':
+	case '\0':
 	    continue;
 
 	case '?':
-	    xdp->xd_buf = strdup(trim(cp + 1));
-	    xdp->xd_len = strlen(xdp->xd_buf);
+	    cp = trim(cp + 1);
+	    xo_xparse_set_input(xdp, cp, strlen(cp));
 	    xo_xpath_yyparse(xdp);
 	    xo_xparse_dump(xdp);
 	    break;
@@ -120,19 +147,27 @@ main (int argc, char **argv)
 	    break;
 
 	case '=':
-	    printf("value: %s\n", trim(cp + 1));
+	    fprintf(stderr, "main: allow: %s\n",
+		    xo_filter_allow(xop, xfp) ? "true" : "false");
+	    break;
+
+	case '$':
+	    key = cp + 1;
+	    value = clean_token(key);
+	    fprintf(stderr, "main: key: '%s'='%s'\n", key, value);
+	    rc = xo_filter_key(xop, xfp, key, strlen(key), value, strlen(value));
 	    break;
 
 	case 'r':		/* Reset */
 	    /* Out with the old */
-	    xo_filter_destroy(xfp);
+	    xo_filter_destroy(xop, xfp);
 
 	    /* In with the new */
 	    xfp = xo_filter_create(NULL);
 	    if (xfp == NULL)
 		xo_errx(1, "allocation of filter failed");
 
-	    xdp = xo_filter_data(xfp);
+	    xdp = xo_filter_data(xop, xfp);
 
 	    xo_xparse_init(xdp);
 	    strncpy(xdp->xd_filename, "test", sizeof(xdp->xd_filename));
@@ -140,12 +175,12 @@ main (int argc, char **argv)
 	    break;
 
 	default:
-	    xo_dbg(NULL, "filter: invalid line '%s'", cp);
+	    fprintf(stderr, "main: filter: invalid line '%s'\n", cp);
 	    
 	}
 
 	if (rc >= 0)
-	    xo_dbg(NULL, "filter: allow: %s", rc ? "true" : "false");
+	    fprintf(stderr, "main: filter: allow: %s\n", rc ? "true" : "false");
     }
 
 

@@ -39,13 +39,22 @@ main (int argc, char **argv)
 	    xo_xpath_yydebug = 1;
     }
 
-    xo_xparse_node_t *xnp UNUSED;
+    if (argv[2])
+	output = argv[2];
 
-    xo_filter_t *xfp = xo_filter_create(NULL);
+    FILE *fp = fopen(output, "w+");
+    if (fp == NULL)
+	xo_errx(1, "open failed");
+
+    xo_handle_t *xop = xo_create_to_file(fp, XO_STYLE_XML, XOF_PRETTY);
+    if (xop == NULL)
+	xo_errx(1, "create failed");
+
+    xo_filter_t *xfp = xo_filter_create(xop);
     if (xfp == NULL)
 	xo_errx(1, "allocation of filter failed");
 
-    xo_xparse_data_t *xdp = xo_filter_data(xfp);
+    xo_xparse_data_t *xdp = xo_filter_data(xop, xfp);
 
     strncpy(xdp->xd_filename, "test", sizeof(xdp->xd_filename));
     xdp->xd_buf = strdup(argv[1]);
@@ -62,16 +71,6 @@ main (int argc, char **argv)
     
     xo_xparse_dump(xdp);
 
-    if (argv[2])
-	output = argv[2];
-
-    FILE *fp = fopen(output, "w+");
-    if (fp == NULL)
-	xo_errx(1, "open failed");
-
-    xo_handle_t *xop = xo_create_to_file(fp, XO_STYLE_XML, XOF_PRETTY);
-    if (xop == NULL)
-	xo_errx(1, "create failed");
 
     xo_filter_open_container(xop, xfp, "one");
     xo_filter_open_container(xop, xfp, "two");

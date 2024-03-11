@@ -206,6 +206,12 @@
 %token C_PREDICATE		/* Node contains a predicate */
 %token C_TEST			/* Node test (e.g. node()) */
 %token C_UNION			/* Union of two paths */
+%token C_INT64			/* Signed 64-bit integer */
+%token C_UINT64			/* Unsigned 64-bit integer */
+%token C_FLOAT			/* Floating point number (double) */
+%token C_STRING			/* String value (const char *) */
+%token C_BOOLEAN		/* Boolean value */
+/* Note: Add new names to xo_xparse_ttname_map[] in xo_xparse.c */
 
 /*
  * Use a "%pure-parser" for reentracy
@@ -452,9 +458,14 @@ xp_not_expr :
 	xp_path_expr 
 		{ 
 		    xo_xparse_node_id_t id = xo_xparse_node_new(xparse_data);
-		    xo_xparse_node_t *xnp = xo_xparse_node(xparse_data, id);
-		    xnp->xn_type = C_PATH;
-		    xo_xparse_node_set_contents(xparse_data, id, $1);
+		    xo_xparse_node_t *xnp = xo_xparse_node(xparse_data, $1);
+		    if (xnp->xn_type == C_ELEMENT) {
+			xnp = xo_xparse_node(xparse_data, id);
+			xnp->xn_type = C_PATH;
+			xo_xparse_node_set_contents(xparse_data, id, $1);
+		    } else {
+			id = $1;
+		    }
 		    $$ = xo_xparse_yyval(xparse_data, id);
 		}
 
@@ -895,7 +906,7 @@ const char *xo_xparse_token_name_fancy[YYNTOKENS];
  * Return a human-readable name for a given token type
  */
 const char *
-xo_xparse_token_name (int ttype)
+xo_xparse_token_name (xo_xparse_token_t ttype)
 {
     if (ttype < 0 || ttype >= YYNTOKENS)
 	return "unknown";
@@ -904,7 +915,7 @@ xo_xparse_token_name (int ttype)
 }
 
 const char *
-xo_xparse_fancy_token_name (int ttype)
+xo_xparse_fancy_token_name (xo_xparse_token_t ttype)
 {
     if (ttype < 0 || ttype >= YYNTOKENS)
 	return "unknown";
@@ -915,8 +926,8 @@ xo_xparse_fancy_token_name (int ttype)
 /*
  * Expose YYTRANSLATE outside the yacc file
  */
-int
-xo_xparse_token_translate (int ttype)
+xo_xparse_token_t
+xo_xparse_token_translate (xo_xparse_token_t ttype)
 {
     return YYTRANSLATE(ttype);
 }
@@ -925,7 +936,6 @@ xo_xparse_token_translate (int ttype)
 #define YYTERROR YYSYMBOL_YYerror /* the new enum */
 #endif /* YYTERROR */
 
-#if 1
 /*
  * Return a better class of error message, if possible.  But it turns
  * out that this isn't possible in yacc.  bison adds a "lookahead
@@ -948,4 +958,3 @@ xo_xparse_expecting_error (const char *token, int yystate UNUSED,
 
     return strdup(buf);
 }
-#endif

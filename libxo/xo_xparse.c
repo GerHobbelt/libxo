@@ -196,7 +196,7 @@ xo_xparse_ttname_map_t xo_xparse_ttname_map[] = {
     { T_NUMBER,			"number" },
     { T_QUOTED,			"quoted string" },
     { T_VAR,			"variable name" },
-    { C_ABSOLUTE,		"Absolute path" },
+    { C_ABSOLUTE,		"absolute path" },
     { C_ATTRIBUTE,		"attribute axis" },
     { C_DESCENDANT,		"descendant child ('one//two')" },
     { C_ELEMENT,		"path element" },
@@ -207,6 +207,12 @@ xo_xparse_ttname_map_t xo_xparse_ttname_map[] = {
     { C_PREDICATE,		"predicate ('[test]')" },
     { C_TEST,			"node test ('node()')" },
     { C_UNION,			"union of two paths ('one|two')" },
+    { C_INT64,			"signed 64-bit integer" },
+    { C_UINT64,			"unsigned 64-bit integer" },
+    { C_FLOAT,			"floating point number (double)" },
+    { C_STRING,			"string value (const char *)" },
+    { C_BOOLEAN,		"boolean value" },
+    { M_ERROR,                  "invalid xpath expression" },
     { 0, NULL }
 };
 
@@ -410,6 +416,25 @@ xo_xparse_warn (xo_xparse_data_t *xdp, const char *fmt, ...)
     va_end(vap);
 }
 
+static char *
+xo_xparse_location (xo_xparse_data_t *xdp)
+{
+    static char xo_location[MAXPATHLEN + 64]; /* Path size plus little extra */
+
+    if (xdp->xd_filename[0] == 0) {
+	xo_location[0] = '\0';		/* We have no information */
+
+    } else if (xdp->xd_line == 0) {
+	snprintf(xo_location, sizeof(xo_location), "%s: ", xdp->xd_filename);
+
+    } else {
+	snprintf(xo_location, sizeof(xo_location), "%s:%u:%u ",
+		 xdp->xd_filename, xdp->xd_line, xdp->xd_col);
+    }
+
+    return xo_location;
+}
+
 /**
  * Issue an error if the axis name is not valid
  *
@@ -456,16 +481,22 @@ xo_xparse_check_axis_name (xo_xparse_data_t *xdp, xo_xparse_node_id_t id)
 	    return;
     }
 
-    xo_xparse_warn(xdp, "%s:%u:%u unknown axis name: '%s'\n",
-		   xdp->xd_filename, xdp->xd_line, xdp->xd_col, str);
+    xo_xparse_warn(xdp, "%sunknown axis name: '%s'\n",
+		   xo_xparse_location(xdp), str);
 }
 
 xo_xparse_str_id_t
-xo_xparse_str_new (xo_xparse_data_t *xdp UNUSED)
+xo_xparse_str_new (xo_xparse_data_t *xdp, xo_xparse_token_t type)
 {
     xo_off_t len = xdp->xd_cur - xdp->xd_start;
     const char *start = xdp->xd_buf + xdp->xd_start;
     xo_buffer_t *xbp = &xdp->xd_str_buf;
+
+    /* If this is a quoted string, we want to trim the quotes */
+    if (type == T_QUOTED && len >= 2) {
+	start += 1;		/* Skip the leading quote */
+	len -= 2;
+    }
 
     xo_off_t cur = xbp->xb_curp - xbp->xb_bufp;
     char *newp = xo_buf_append_val(xbp, start, len + 1);
@@ -476,7 +507,35 @@ xo_xparse_str_new (xo_xparse_data_t *xdp UNUSED)
     return newp ? cur : 0;
 }
 
-static void
+void
+xo_xparse_set_input (xo_xparse_data_t *xdp, const char *buf, xo_ssize_t len)
+{
+    if (xdp->xd_size < len + 1) {
+	size_t size = (len + 1 + XD_BUF_FUDGE);
+	size += XD_BUF_INCR - 1;
+	size &= ~(XD_BUF_INCR - 1);
+
+	xdp->xd_buf = xo_realloc(xdp->xd_buf, size);
+	xdp->xd_size = xdp->xd_buf ? size : 0;
+    }
+
+    if (xdp->xd_buf) {
+	xdp->xd_len = len;
+	memcpy(xdp->xd_buf, buf, len);
+	xdp->xd_buf[len] = '\0';
+    } else {
+	xdp->xd_len = 0;
+    }
+
+    xdp->xd_cur = 0;
+    xdp->xd_start = 0;
+
+    xdp->xd_errors = 0;
+    xdp->xd_col = 0;
+    xdp->xd_col_start = 0;
+}
+
+void
 xo_xparse_dump_one_node (xo_xparse_data_t *xdp, xo_xparse_node_id_t id,
 			 int indent, const char *title)
 {
@@ -489,8 +548,8 @@ xo_xparse_dump_one_node (xo_xparse_data_t *xdp, xo_xparse_node_id_t id,
     xo_xparse_node_t *next = xo_xparse_node(xdp, xnp->xn_next);
     xo_xparse_node_t *prev = xo_xparse_node(xdp, xnp->xn_prev);
 
-    printf("%*s%s%06ld/%p: type %u (%s), str %ld %p [%s], "
-	   "contents %ld (%p), next %ld (%p)%s, prev %ld (%p)%s\n",
+    xo_dbg(NULL, "%*s%s%06ld/%p: type %u (%s), str %ld %p [%s], "
+	   "contents %ld (%p), next %ld (%p)%s, prev %ld (%p)%s",
 	   indent, "", title ?: "", id, xnp,
 	   xnp->xn_type, xo_xparse_token_name(xnp->xn_type),
 	   xnp->xn_str, str, str ?: "",
@@ -519,7 +578,7 @@ xo_xparse_dump (xo_xparse_data_t *xdp)
     xo_xparse_node_id_t *pp = xdp->xd_paths;
 
     for (i = 0; i < xdp->xd_paths_cur; i++, pp++) {
-	printf("--- %u: %ld\n", i, *pp);
+	xo_dbg(NULL, "--- %u: %ld", i, *pp);
 	xo_xparse_dump_node(xdp, *pp, 4);
     }
 }
@@ -530,9 +589,9 @@ xo_xparse_feature_warn_one_node (const char *tag, xo_xparse_data_t *xdp UNUSED,
 				 xo_xparse_node_id_t id UNUSED,
 				 xo_xparse_node_t *xnp)
 {
-    int type = xnp->xn_type;
+    xo_xparse_token_t type = xnp->xn_type;
 
-    if (type > 0 && type < len && map[type]) {
+    if ((int) type < len && map[type]) {
 	xo_xparse_warn(xdp, "%s%sxpath feature is unsupported: %s\n",
 		       tag ?: "", tag ? ": " : "",
 		       xo_xparse_fancy_token_name(type));
@@ -795,56 +854,6 @@ xo_xparse_lexer (xo_xparse_data_t *xdp)
     ch2 = (xdp->xd_cur + 1 < xdp->xd_len) ? xdp->xd_buf[xdp->xd_cur + 1] : 0;
     ch3 = (xdp->xd_cur + 2 < xdp->xd_len) ? xdp->xd_buf[xdp->xd_cur + 2] : 0;
 
-#if 0
-    /*
-     * The rules for YANG are fairly simple.  But if we're
-     * looking for a string argument, it's pretty easy.
-     */
-    if ((xdp->xd_flags & SDF_STRING)
-		&& ch1 != '{' && ch1 != '}' && ch1 != ';' && ch1 != '+') {
-	if (ch1 == '\'' || ch1 == '"') {
-	    /*
-	     * Found a quoted string.  Scan for the end.  We may
-	     * need to read some more, if the string is long.
-	     */
-	    if (xo_xparse_move_cur(xdp))
-		return -1;
-
-	    for (;;) {
-		if (xdp->xd_cur == xdp->xd_len)
-		    if (xo_xparse_get_input(xdp, 0))
-			return -1;
-
-		if ((uint8_t) xdp->xd_buf[xdp->xd_cur] == ch1)
-		    break;
-
-		int bump = (xdp->xd_buf[xdp->xd_cur] == '\\') ? 1 : 0;
-
-		if (xo_xparse_move_cur(xdp))
-		    return -1;
-
-#if 0
-		if (bump && !xo_xparse_parse_is_xpath(xdp)
-		    && xdp->xd_cur < xdp->xd_len)
-		    xdp->xd_cur += bump;
-#endif
-	    }
-
-	    if (xdp->xd_cur < xdp->xd_len)
-		xdp->xd_cur += 1;	/* Move past the end quote */
-
-	    return T_QUOTED;
-	}
-	
-	for (xdp->xd_cur++; xdp->xd_cur < xdp->xd_len; xdp->xd_cur++) {
-	    int ch = xdp->xd_buf[xdp->xd_cur];
-	    if (isspace((int) ch) || ch == ';' || ch == '{' || ch == '}')
-		break;
-	}
-	return (xdp->xd_buf[xdp->xd_start] == '$') ? T_VAR : T_BARE;
-    }
-#endif
-
     if (ch1 < XO_MAX_CHAR) {
 	if (xo_triple_wide[ch1]) {
 	    rc = xo_xparse_triple_wide(xdp, ch1, ch2, ch3);
@@ -893,22 +902,6 @@ xo_xparse_lexer (xo_xparse_data_t *xdp)
                  */
 		if (!xo_xparse_is_bare_char(ch2))
 		    return lit1;
-#if 0
-	    } else if (xdp->xd_parse == M_JSON
-		       && (lit1 == L_PLUS || lit1 == L_MINUS)) {
-		static const char digits[] = "0123456789.+-eE";
-		unsigned char ch;
-
-		rc = lit1;
-		for ( ; xdp->xd_cur < xdp->xd_len; xdp->xd_cur++) {
-		    ch = xdp->xd_buf[xdp->xd_cur];
-		    if (strchr(digits, (int) ch) == NULL)
-			return rc;
-		    rc = T_NUMBER;
-		}
-
-		return rc;
-#endif
 	    } else {
 		return lit1;
 	    }
@@ -930,16 +923,15 @@ xo_xparse_lexer (xo_xparse_data_t *xdp)
 		if ((uint8_t) xdp->xd_buf[xdp->xd_cur] == ch1)
 		    break;
 
-#if 0
+#if 1
 		int bump = (xdp->xd_buf[xdp->xd_cur] == '\\') ? 1 : 0;
 #endif
 
 		if (xo_xparse_move_cur(xdp))
 		    return -1;
 
-#if 0
-		if (bump && !xo_xparse_parse_is_xpath(xdp)
-			&& xdp->xd_cur < xdp->xd_len)
+#if 1
+		if (bump && xdp->xd_cur < xdp->xd_len)
 		    xdp->xd_cur += bump;
 #endif
 	    }
@@ -986,21 +978,6 @@ xo_xparse_lexer (xo_xparse_data_t *xdp)
 	    return T_NUMBER;
 	}
     }
-
-#if 0
-    /*
-     * The rules for JSON are a bit simpler.  T_BARE can't contain
-     * colons and we don't need the fancy exceptions below.
-     */
-    if (xdp->xd_parse == M_JSON) {
-	for ( ; xdp->xd_cur < xdp->xd_len; xdp->xd_cur++) {
-	    int ch = xdp->xd_buf[xdp->xd_cur];
-	    if (!isalnum((int) ch) && ch != '_')
-		break;
-	}
-	return T_BARE;
-    }
-#endif
 
     /*
      * Must have found a bare word or a function name, since they
@@ -1137,7 +1114,7 @@ xo_xpath_yylex (xo_xparse_data_t *xdp, xo_xparse_node_id_t *yylvalp)
 	xo_dbg(xdp->xd_xop, "%s:%u:%u: xpath: lex: zero length token: %d/%s",
 	       xdp->xd_filename, xdp->xd_line, xdp->xd_col,
 	       rc, xo_xparse_token_name(rc));
-	rc = M_ERROR;
+	xdp->xd_last = rc = M_ERROR;
 
 	/*
 	 * We're attempting to return a reasonable token type, but
@@ -1152,7 +1129,7 @@ xo_xpath_yylex (xo_xparse_data_t *xdp, xo_xparse_node_id_t *yylvalp)
 
     xnp->xn_type = rc;
     if (rc > 0)
-	xnp->xn_str = xo_xparse_str_new(xdp);
+	xnp->xn_str = xo_xparse_str_new(xdp, rc);
 
     xo_dbg(NULL, "xo_xplex: lex: %p '%.*s' -> %d/%s %s",
 	   xnp, xdp->xd_cur - xdp->xd_start,
@@ -1194,31 +1171,10 @@ xo_xparse_syntax_error (xo_xparse_data_t *xdp UNUSED, const char *token,
     } else if (yychar == -1) {
 	SNPRINTF(cp, ep, "unexpected end-of-expression");
 
-#if 0
-	nodep = slaxFindOpenNode(xdp);
-	if (nodep) {
-	    int lineno = xmlGetLineNo(nodep);
-
-	    if (lineno > 0) {
-		if (nodep->ns && nodep->ns->href
-			&& streq((const char *)nodep->ns->href, XSL_URI)) {
-		    SNPRINTF(cp, ep,
-			     "; unterminated statement (<xsl:%s>) on line %d",
-			     nodep->name, lineno);
-		} else {
-		    SNPRINTF(cp, ep, "; open element (<%s>) on line %d",
-			     nodep->name, lineno);
-		}
-	    }
-	}
-#endif
-
     } else {
-#if 1
 	char *msg = xo_xparse_expecting_error(token, yystate, yychar);
 	if (msg)
 	    return msg;
-#endif
 
 	SNPRINTF(cp, ep, "unexpected input");
 	if (token)
@@ -1266,16 +1222,15 @@ xo_xpath_yyerror (xo_xparse_data_t *xdp, const char *str, int yystate)
 	char *msg = xo_xparse_syntax_error(xdp, token, yystate, xdp->xd_last);
 
 	if (msg) {
-	    xo_xparse_warn(xdp, "%s:%u:%u: %s%s\n",
-			   xdp->xd_filename, xdp->xd_line, xdp->xd_col,
-			   msg, buf);
+	    xo_xparse_warn(xdp, "%sfilter expression error: %s",
+			   xo_xparse_location(xdp), msg, buf);
 	    xo_free(msg);
 	    return 0;
 	}
     }
 
-    xo_xparse_warn(xdp, "%s:%u:%u: %s%s%s%s%s\n",
-		   xdp->xd_filename, xdp->xd_line, xdp->xd_col, str,
+    xo_xparse_warn(xdp, "%sfilter expression error: %s%s%s%s%s",
+		   xo_xparse_location(xdp), str,
 		   token ? " before " : "", token, token ? ": " : "", buf);
 
     return 0;

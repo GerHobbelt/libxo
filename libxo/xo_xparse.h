@@ -17,11 +17,12 @@
 typedef unsigned xo_xparse_node_type_t;
 typedef xo_off_t xo_xparse_str_id_t;
 typedef xo_off_t xo_xparse_node_id_t;
+typedef uint32_t xo_xparse_token_t;
 
 typedef void (*xo_xpath_warn_func_t)(void *data, const char *, va_list);
 
 typedef struct xo_xparse_node_s {
-    uint32_t xn_type;		/* Type of this node (token) */
+    xo_xparse_token_t xn_type;	/* Type of this node (token) */
     xo_off_t xn_str;		/* String value (in xd_str_buf) */
     xo_xparse_node_id_t xn_contents; /* Child node (main) (in xd_node_buf) */
     xo_xparse_node_id_t xn_next; /* Next node (in xd_node_buf) */
@@ -37,8 +38,8 @@ typedef struct xo_xparse_data_s {
     unsigned xd_line;           /* Line number */
     unsigned xd_col;		/* Column number */
     unsigned xd_col_start;	/* First column of current line */
-    int xd_last;		/* Last token returned */
-    int xd_ttype;		/* Magic token to return */
+    xo_xparse_token_t xd_last;	/* Last token returned */
+    xo_xparse_token_t xd_ttype;	/* Magic token to return */
 
     xo_xparse_node_id_t *xd_paths;  /* Root of each parse tree */
     uint32_t xd_paths_cur;	/* Current depth of xf_paths[] */
@@ -71,26 +72,11 @@ extern const char *xo_xparse_keyword_string[];
 extern const char *xo_xparse_token_name_fancy[];
 extern int xo_xpath_yydebug;
 
-int
-xo_xparse_token_translate (int ttype);
-
 static inline int
 xo_xparse_is_bare_char (int ch)
 {
     return (isalnum(ch) || (ch == ':') || (ch == '_') || (ch == '.')
             || (ch == '-') || (ch & 0x80));
-}
-
-/*
- * Initialize all the input data fields in xdp
- */
-static inline void
-xo_xparse_set_data (xo_xparse_data_t *xdp, const char *str)
-{
-    ssize_t len = strlen(str);
-
-    xdp->xd_buf = xo_realloc(xdp->xd_buf, len);
-    xdp->xd_len = xdp->xd_buf ? len : 0;
 }
 
 /*
@@ -173,13 +159,13 @@ xo_xpath_parse (xo_xparse_data_t *);
  * Return a human-readable name for a given token type
  */
 const char *
-xo_xparse_token_name (int ttype);
+xo_xparse_token_name (xo_xparse_token_t ttype);
 
 /*
  * Expose YYTRANSLATE outside the yacc file
  */
-int
-xo_xparse_token_translate (int ttype);
+xo_xparse_token_t
+xo_xparse_token_translate (xo_xparse_token_t ttype);
 
 /*
  * Return a better class of error message
@@ -271,7 +257,7 @@ xo_xparse_node_extract_string (xo_xparse_data_t *xdp, xo_xparse_node_id_t id)
 }
 
 xo_xparse_str_id_t
-xo_xparse_str_new (xo_xparse_data_t *xdp);
+xo_xparse_str_new (xo_xparse_data_t *, xo_xparse_token_t);
 
 void
 xo_xparse_init (xo_xparse_data_t *xdp);
@@ -292,7 +278,7 @@ int
 xo_xparse_yyval (xo_xparse_data_t *xdp, xo_xparse_node_id_t id);
 
 const char *
-xo_xparse_fancy_token_name (int id);
+xo_xparse_fancy_token_name (xo_xparse_token_t id);
 
 int
 xo_xpath_feature_warn (const char *tag, xo_xparse_data_t *xdp,
@@ -324,5 +310,12 @@ xo_xparse_node_is_attr_axis (xo_xparse_data_t *xdp, xo_xparse_node_id_t id)
 
 void
 xo_xparse_results (xo_xparse_data_t *xdp, xo_xparse_node_id_t id);
+
+void
+xo_xparse_dump_one_node (xo_xparse_data_t *xdp, xo_xparse_node_id_t id,
+			 int indent, const char *title);
+
+void
+xo_xparse_set_input (xo_xparse_data_t *xdp, const char *buf, xo_ssize_t len);
 
 #endif /* XO_XPARSE_H */
