@@ -42,9 +42,12 @@
 #include <ctype.h>
 #include <wctype.h>
 #include <getopt.h>
-#include <langinfo.h>
 
 #include "xo_config.h"
+
+#ifdef HAVE_LANGINFO_H
+#include <langinfo.h>
+#endif /* HAVE_LANGINFO_H */
 
 #ifdef LIBXO_TEXT_ONLY		/* Turn off unneeded features */
 #undef LIBXO_NEED_MAP		/* No tag maps in text mode */
@@ -119,6 +122,12 @@ extern char etext;
 #ifndef TRUE
 #define TRUE 1
 #endif
+
+/* Make our own version for older versions of GCC that don't have this */
+#ifndef __GNUC_PREREQ
+#define __GNUC_PREREQ(maj,min) \
+    ((__GNUC__ << 16) + __GNUC_MINOR__ >= ((maj) << 16) + (min))
+#endif /* __GNUC_PREREQ */
 
 /*
  * Three styles of specifying thread-local variables are supported.
@@ -441,9 +450,6 @@ xo_transition (xo_handle_t *xop, xo_xof_flags_t flags, const char *name,
 	       xo_state_t new_state);
 
 static int
-xo_set_options_simple (xo_handle_t *xop, const char *input);
-
-static int
 xo_color_find (const char *str);
 
 static void
@@ -712,6 +718,13 @@ xo_init_handle (xo_handle_t *xop)
     XOIF_CLEAR(xop, XOIF_INIT_IN_PROGRESS);
 }
 
+static void
+xo_default_init_utf8 (xo_handle_t *xop)
+{
+    if (xo_codeset_is_utf8)
+       XOF_SET(xop, XOF_UTF8);
+}
+
 /*
  * Initialize the default handle.
  */
@@ -721,19 +734,7 @@ xo_default_init (void)
     xo_handle_t *xop = &xo_default_handle;
 
     xo_init_handle(xop);
-
-    if (xo_codeset_is_utf8)
-	XOF_SET(xop, XOF_UTF8);
-
-#if 0 /* !defined(NO_LIBXO_OPTIONS) */
-    if (!XOF_ISSET(xop, XOF_NO_ENV)) {
-       char *env = getenv("LIBXO_OPTIONS");
-
-       if (env)
-           xo_set_options_simple(xop, env);
-
-    }
-#endif /* NO_LIBXO_OPTIONS */
+    xo_default_init_utf8(xop);
 
     xo_default_inited = 1;
 }
@@ -2169,7 +2170,7 @@ xo_name_to_style (const char *name)
 
 /* Simple name->value mapping */
 typedef struct xo_flag_mapping_s {
-    xo_xff_flags_t xm_value;	/* Flag value */
+    xo_xof_flags_t xm_value;	/* Flag value */
     const char *xm_name;	/* String name */
 } xo_flag_mapping_t;
 
@@ -2241,21 +2242,6 @@ static xo_flag_mapping_t xo_xof_names[] = {
     { XOF_WARN, "warn" },
     { XOF_WARN_XML, "warn-xml" },
     { XOF_XPATH, "xpath" },
-    { 0, NULL }
-};
-
-/* Options available via the environment variable ($LIBXO_OPTIONS) */
-static xo_flag_mapping_t xo_xof_simple_names[] = {
-    { XOF_COLOR_ALLOWED, "color" },
-    { XOF_FLUSH, "flush" },
-    { XOF_FLUSH_LINE, "flush-line" },
-    { XOF_NO_HUMANIZE, "no-humanize" },
-    { XOF_NO_LOCALE, "no-locale" },
-    { XOF_RETAIN_NONE, "no-retain" },
-    { XOF_PRETTY, "pretty" },
-    { XOF_RETAIN_ALL, "retain" },
-    { XOF_UNDERSCORES, "underscores" },
-    { XOF_WARN, "warn" },
     { 0, NULL }
 };
 
@@ -2342,7 +2328,7 @@ xo_set_color_map (xo_handle_t *xop, char *value)
 	xop->xo_color_map_bg[num] = (bg < 0) ? num : bg;
 #endif /* LIBXO_TEXT_ONLY */
 
-	if (++num > XO_NUM_COLORS)
+	if (++num >= XO_NUM_COLORS)
 	    break;
     }
 
@@ -2357,44 +2343,6 @@ xo_set_color_map (xo_handle_t *xop, char *value)
     for ( ; num < XO_NUM_COLORS; num++)
 	xop->xo_color_map_fg[num] = xop->xo_color_map_bg[num] = num;
 #endif /* LIBXO_TEXT_ONLY */
-}
-
-static int UNUSED
-xo_set_options_simple (xo_handle_t *xop, const char *input)
-{
-    xo_xof_flags_t new_flag;
-    char *cp, *ep, *vp, *np, *bp;
-    ssize_t len = strlen(input) + 1;
-
-    bp = alloca(len);
-    memcpy(bp, input, len);
-
-    for (cp = bp, ep = cp + len - 1; cp && cp < ep; cp = np) {
-	np = strchr(cp, ',');
-	if (np)
-	    *np++ = '\0';
-
-	vp = strchr(cp, '=');
-	if (vp)
-	    *vp++ = '\0';
-
-	if (xo_streq("colors", cp)) {
-	    xo_set_color_map(xop, vp);
-	    continue;
-	}
-
-	new_flag = xo_name_lookup(xo_xof_simple_names, cp, -1);
-	if (new_flag != 0) {
-	    XOF_SET(xop, new_flag);
-	} else if (xo_streq(cp, "no-color")) {
-	    XOF_CLEAR(xop, XOF_COLOR_ALLOWED);
-	} else {
-	    xo_failure(xop, "unknown simple option: %s", cp);
-	    return -1;
-	}
-    }
-
-    return 0;
 }
 
 /**
@@ -3531,6 +3479,18 @@ xo_trim_ws (xo_buffer_t *xbp, ssize_t len)
 }
 
 /*
+ * Pull a "long double" off our va_list.  This was originally done as
+ * a function to hide some evil bits we had to do to work around a
+ * gcc-4.9 bug, but that's ancient so we've removed the evil but left
+ * the function just in case the bug returns.  A pessimist, eh?
+ */
+static inline void
+xo_safe_va_arg_long_double (xo_handle_t *xop)
+{
+    va_arg(xop->xo_vap, long double);
+}
+
+/*
  * Interface to format a single field.  The arguments are in xo_vap,
  * and the format is in 'fmt'.  If 'xbp' is null, we use xop->xo_data;
  * this is the most common case.
@@ -3843,7 +3803,7 @@ xo_do_format_field (xo_handle_t *xop, xo_buffer_t *xbp,
 		    }
 		} else if (strchr("eEfFgGaA", xf.xf_fc) != NULL)
 		    if (xf.xf_lflag)
-			va_arg(xop->xo_vap, long double);
+			xo_safe_va_arg_long_double(xop);
 		    else
 			va_arg(xop->xo_vap, double);
 

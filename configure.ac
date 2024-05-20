@@ -12,7 +12,7 @@
 #
 
 AC_PREREQ([2.69])
-AC_INIT([libxo],[1.7.0],[phil@juniper.net])
+AC_INIT([libxo],[1.7.3],[phil@juniper.net])
 AM_INIT_AUTOMAKE([-Wall -Werror foreign -Wno-portability])
 
 # Support silent build rules.  Requires at least automake-1.11.
@@ -77,6 +77,7 @@ AC_CHECK_HEADERS([ctype.h])
 AC_CHECK_HEADERS([dlfcn.h])
 AC_CHECK_HEADERS([dlfcn.h])
 AC_CHECK_HEADERS([errno.h])
+AC_CHECK_HEADERS([langinfo.h])
 AC_CHECK_HEADERS([monitor.h])
 AC_CHECK_HEADERS([stdio.h])
 AC_CHECK_HEADERS([stdio_ext.h])
