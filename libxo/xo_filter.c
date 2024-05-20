@@ -15,7 +15,6 @@
 #include <inttypes.h>
 #include <string.h>
 #include <sys/param.h>
-#include <math.h>
 
 #define LIBXO_NEED_FILTER
 #include "xo.h"
@@ -1019,13 +1018,11 @@ xo_filter_dump_data (xo_handle_t *xop, xo_filter_t *xfp UNUSED,
 
     case C_BOOLEAN:
     case C_INT64:
-	snprintf(buf, sizeof(buf), "%" PRId64,
-		 (long long) data.xfd_int64);
+	snprintf(buf, sizeof(buf), "%" PRId64, data.xfd_int64);
 	break;
 
     case C_UINT64:
-	snprintf(buf, sizeof(buf), "%" PRIu64,
-		 (unsigned long long) data.xfd_uint64);
+	snprintf(buf, sizeof(buf), "%" PRIu64, data.xfd_uint64);
 	break;
 
     case C_FLOAT:
@@ -1268,10 +1265,22 @@ xo_filter_eval_op_div (XO_FILTER_OP_ARGS)
 			       xo_filter_eval_calc_div);
 }
 
+static xo_float_t
+xo_fmod (xo_float_t x, xo_float_t y)
+{
+    if (y == 0)
+	return 0;
+
+    int64_t i = (int64_t)(x / y);
+    xo_float_t n = y * (xo_float_t) i;
+
+    return x - (xo_float_t) n;
+}
+
 static xo_filter_data_t
 xo_filter_eval_calc_mod (XO_FILTER_CALC_ARGS)
 {
-    left.xfd_float = fmod(left.xfd_float, right.xfd_float);
+    left.xfd_float = xo_fmod(left.xfd_float, right.xfd_float);
     return left;
 }
 
