@@ -184,6 +184,13 @@
 #define YYERROR_VERBOSE
 
 /*
+ * To save space, we use our own YYINT instead of the standard "int"
+ * definition.  Sadly, this isn't an easy replacement, so we use
+ * "SED_OPTS" in Makefile.am to remove the original typedef.
+ */
+#define YYINT int16_t
+
+/*
  * With a "pure" parser, these are all local variables so we don't
  * need to have them #defined into "long" version (with the prefix),
  * so we nuke the #defines and use the real/old names.
@@ -214,8 +221,10 @@
 /* Log via our function */
 #define YYFPRINTF(_fp, _fmt...) xo_xparse_yyprintf(xparse_data, _fmt)
 #else /* XO_YYDEBUG */
-#define YYDEBUG 1		/* Enable debug output */
+#define YYDEBUG 1		/* Needed for yytname[] */
 #define YYFPRINTF xo_dont_bother /* Don't log via our function */
+#define fprintf xo_dont_bother
+#define getenv(_x) NULL		/* Don't let it fetch "YYDEBUG" */
 
 static inline void UNUSED
 xo_dont_bother (FILE *fp UNUSED, const char *fmt UNUSED, ...)

@@ -6,19 +6,21 @@
 # using the SOFTWARE, you agree to be bound by the terms of that
 # LICENSE.
 
-SUBDIRS = core utf8 xo xpath
+SUBDIRS = core utf8 xo
 
 if HAVE_GETTEXT
 SUBDIRS += gettext
 endif
 
+if LIBXO_NEED_FILTERS
+SUBDIRS += xpath
+endif
+
 test tests:
 	@(cur=`pwd` ; for dir in $(SUBDIRS) ; do \
-	    if [ $$dir != "xpath" ]; then \
 		cd $$dir ; \
 		$(MAKE) tests ; \
 		cd $$cur ; \
-	    fi \
 	done)
 
 accept:
