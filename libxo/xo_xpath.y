@@ -136,8 +136,9 @@
 
 /*
  * Use a "%pure-parser" for reentracy
- */
 %define api.pure full
+ */
+%pure-parser
 
 %{
 
@@ -833,7 +834,7 @@ const char *xo_xparse_token_name_fancy[YYNTOKENS];
 const char *
 xo_xparse_token_name (xo_xparse_token_t ttype)
 {
-    if (ttype < 0 || ttype >= YYNTOKENS)
+    if (ttype >= YYNTOKENS)
 	return "unknown";
 
     return yytname[YYTRANSLATE(ttype)];
@@ -842,7 +843,7 @@ xo_xparse_token_name (xo_xparse_token_t ttype)
 const char *
 xo_xparse_fancy_token_name (xo_xparse_token_t ttype)
 {
-    if (ttype < 0 || ttype >= YYNTOKENS)
+    if (ttype >= YYNTOKENS)
 	return "unknown";
 
     return xo_xparse_token_name_fancy[YYTRANSLATE(ttype)];
