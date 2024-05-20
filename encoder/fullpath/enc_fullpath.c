@@ -14,6 +14,8 @@
 #include "xo.h"
 #include "xo_encoder.h"
 
+#define FALLTHRU __attribute__((__fallthrough__))
+
 typedef struct fullpath_private_s {
     uint32_t fp_flags;		/* Flags for the structure (FPF_*) */
     xo_buffer_t fp_data;
@@ -25,6 +27,7 @@ typedef struct fullpath_private_s {
 
 /* Flags for fp_flags */
 #define FPF_SLAX	(1<<0)	/* Make slax-like output */
+#define FPF_FLUSH	(1<<1)	/* Flush each line */
 
 #define XO_FP_DEFAULT_STACK_SIZE 16
 
@@ -126,6 +129,9 @@ fullpath_options (xo_handle_t *xop, fullpath_private_t *fpp,
 	if (xo_streq(cp, "slax")) {
 	    fpp->fp_flags |= FPF_SLAX;
 
+	} else if (xo_streq(cp, "flush")) {
+	    fpp->fp_flags |= FPF_FLUSH;
+
 	} else {
 	    xo_warn_hc(xop, -1,
 		       "unknown encoder option value: '%s'", cp);
@@ -134,6 +140,39 @@ fullpath_options (xo_handle_t *xop, fullpath_private_t *fpp,
     }
 
     return 0;
+}
+
+/*
+ * Escape a string suitable for adding it to our xpath expression
+ */
+static char *
+fullpath_escape (char *buf, xo_ssize_t bufsiz, const char *str)
+{
+    const char *cp;
+    char *op, *ep;
+    
+
+    for (op = buf, cp = str, ep = buf + bufsiz - 1; *cp && op < ep; cp++) {
+	if (*cp < 26) {
+	    *op++ = '\\';
+	    *op++ = 'a' + *cp;
+	    continue;
+	}
+
+	switch (*cp) {
+	case '\'':
+	case '\"':
+	    *op++ = '\\';
+	    *op++ = *cp;
+	    continue;
+	}
+	
+	*op++ = *cp;
+    }
+
+    *op = '\0';
+
+    return buf;
 }
 
 static int
@@ -190,18 +229,6 @@ fullpath_handler (XO_ENCODER_HANDLER_ARGS)
 	xo_buf_set_len(leader, fullpath_stack_pop(fpp));
 	xo_buf_force_nul(leader);
 	xo_dbg(xop, "fullpath: new leader '%s'", leader->xb_bufp);
-
-#if 0
-	xo_buf_trim(leader, 1);	/* Trim trailing '/' */
-
-	char *base = xo_buf_data(leader, 0);
-	xo_ssize_t len = xo_buf_len(leader);
-	char *str = xo_memrchr(base, '/', len);
-
-	if (str)
-	    len -= (str - base) + 1;
-	xo_buf_trim(leader, len);
-#endif
 	break;
 
     case XO_OP_STRING:		   /* Quoted UTF-8 string */
@@ -210,6 +237,9 @@ fullpath_handler (XO_ENCODER_HANDLER_ARGS)
 	    break;
 
 	int is_pretty = xo_isset_flags(xop, XOF_PRETTY);
+
+	xo_ssize_t esc_size = 2 * strlen(value);
+	char *esc_value = fullpath_escape(alloca(esc_size), esc_size, value);
 
 	if (flags & XFF_KEY) {	 /* Keys turn into predicates */
 	    const char *equals = (fpp->fp_flags & FPF_SLAX)
@@ -220,7 +250,7 @@ fullpath_handler (XO_ENCODER_HANDLER_ARGS)
 	    xo_buf_append_val(leader, "[", 1);
 	    xo_buf_append_str(leader, name);
 	    xo_buf_append_str(leader, equals);
-	    xo_buf_append_str(leader, value);
+	    xo_buf_append_str(leader, esc_value);
 	    xo_buf_append_str(leader, "']/");
 	    xo_buf_force_nul(leader);
 	    break;
@@ -230,13 +260,13 @@ fullpath_handler (XO_ENCODER_HANDLER_ARGS)
 	xo_buf_append_buf(xbp, leader); /* Start with our leading string */
 	xo_buf_append_str(xbp, name);
 	xo_buf_append_str(xbp, is_pretty ? " = '" : "='");
-	xo_buf_append_str(xbp, value);
+	xo_buf_append_str(xbp, esc_value);
 	xo_buf_append_str(xbp, "'\n");
-#if 0
-	break;
-#else
-__attribute__((__fallthrough__));
-#endif
+
+	if (!(fpp->fp_flags & FPF_FLUSH))
+	    break;
+
+	FALLTHRU;
 
     case XO_OP_FLUSH:		   /* Clean up function */
 	rc = write(1, fp_xbp->xb_bufp, fp_xbp->xb_curp - fp_xbp->xb_bufp);
@@ -260,11 +290,6 @@ __attribute__((__fallthrough__));
 	break;
 
     case XO_OP_DEADEND:
-#if 0
-	xo_buf_set_len(leader, fullpath_stack_pop(fpp));
-	xo_buf_force_nul(leader);
-	xo_dbg(NULL, "fullpath: new leader '%s'", leader->xb_bufp);
-#endif
 	break;
 
     }
