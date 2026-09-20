@@ -153,6 +153,8 @@ extern char etext;
 #error unknown thread-local setting
 #endif /* HAVE_THREADS_H */
 
+#define XO_FAKE_TOP_LEVEL_NAME "data"
+
 const char xo_version[] = LIBXO_VERSION;
 const char xo_version_extra[] = LIBXO_VERSION_EXTRA;
 static const char xo_default_format[] = "%s";
@@ -868,23 +870,41 @@ xo_escape_xml (xo_buffer_t *xbp, ssize_t len, xo_xff_flags_t flags)
 {
     ssize_t slen;
     ssize_t delta = 0;
+    int lost = 0;
     char *cp, *ep, *ip;
-    const char *sp;
     int attr = XOF_BIT_ISSET(flags, XFF_ATTR);
+    unsigned char ch;
 
     for (cp = xbp->xb_curp, ep = cp + len; cp < ep; cp++) {
+	ch = *cp;
+
 	/* We're subtracting 2: 1 for the NUL, 1 for the char we replace */
-	if (*cp == '<')
+	if (ch == '<')
 	    delta += sizeof(xo_xml_lt) - 2;
-	else if (*cp == '>')
+	else if (ch == '>')
 	    delta += sizeof(xo_xml_gt) - 2;
-	else if (*cp == '&')
+	else if (ch == '&')
 	    delta += sizeof(xo_xml_amp) - 2;
-	else if (attr && *cp == '"')
+	else if (attr && ch == '"')
 	    delta += sizeof(xo_xml_quot) - 2;
+
+	else if ((unsigned) ch >= 0x20) /* Beware of types here */
+	    continue;
+
+	else {
+	    switch (ch) {
+	    case '\n':
+	    case '\r':
+	    case '\t':
+		break;
+
+	    default:
+		lost += 1;
+	    }
+	}
     }
 
-    if (delta == 0)		/* Nothing to escape; bail */
+    if (delta == 0 && lost == 0) /* Nothing to escape; bail */
 	return len;
 
     if (!xo_buf_has_room(xbp, delta)) /* No room; bail, but don't append */
@@ -896,29 +916,63 @@ xo_escape_xml (xo_buffer_t *xbp, ssize_t len, xo_xff_flags_t flags)
     do {
 	cp -= 1;
 	ip -= 1;
+	const char *sp = NULL;
+	ch = *cp;
 
-	if (*cp == '<')
+	if (ch == '<')
 	    sp = xo_xml_lt;
-	else if (*cp == '>')
+	else if (ch == '>')
 	    sp = xo_xml_gt;
-	else if (*cp == '&')
+	else if (ch == '&')
 	    sp = xo_xml_amp;
-	else if (attr && *cp == '"')
+	else if (attr && ch == '"')
 	    sp = xo_xml_quot;
+	else if ((unsigned) ch >= 0x20) /* Beware of types here */
+	    *ip = ch;
+
 	else {
-	    *ip = *cp;
-	    continue;
+	    char ih = 0;
+
+	    switch (ch) {
+	    case '\n':
+	    case '\r':
+	    case '\t':
+		ih = ch;
+		break;
+
+	    default:
+		ih = ' ';
+	    }
+
+	    if (ih)
+		*ip = ih;
 	}
 
-	slen = strlen(sp);
-	ip -= slen - 1;
-	memcpy(ip, sp, slen);
+	if (sp) {
+	    slen = strlen(sp);
+	    ip -= slen - 1;
+	    memcpy(ip, sp, slen);
+	}
 	
     } while (cp > ep && cp != ip);
 
     return len + delta;
 }
 
+/*
+ * The JSON Standard (RFC 7159) says:
+ * char = unescaped /
+ *          escape (
+ *            %x22 /          ; "    quotation mark  U+0022
+ *            %x5C /          ; \    reverse solidus U+005C
+ *            %x2F /          ; /    solidus         U+002F
+ *            %x62 /          ; b    backspace       U+0008
+ *            %x66 /          ; f    form feed       U+000C
+ *            %x6E /          ; n    line feed       U+000A
+ *            %x72 /          ; r    carriage return U+000D
+ *            %x74 /          ; t    tab             U+0009
+ *            %x75 4HEXDIG )  ; uXXXX                U+XXXX
+ */
 static ssize_t
 xo_escape_json (xo_buffer_t *xbp, ssize_t len, xo_xff_flags_t flags UNUSED)
 {
@@ -926,10 +980,29 @@ xo_escape_json (xo_buffer_t *xbp, ssize_t len, xo_xff_flags_t flags UNUSED)
     char *cp, *ep, *ip;
 
     for (cp = xbp->xb_curp, ep = cp + len; cp < ep; cp++) {
-	if (*cp == '\\' || *cp == '"')
+	char ch = *cp;
+
+	if (ch == '\\' || ch == '"')
 	    delta += 1;
-	else if (*cp == '\n' || *cp == '\r')
+	else if (ch == '/' && (flags & XFF_ESC_SLASH))
 	    delta += 1;
+	else if ((unsigned) ch >= 0x20) { /* Beware of types here */
+	    /* nothing */
+
+	} else {
+	    switch (ch) {
+	    case '\b':
+	    case '\f':
+	    case '\n':
+	    case '\r':
+	    case '\t':
+		delta += 1;
+		break;
+
+	    default:
+		delta += 5;
+	    }
+	}
     }
 
     if (delta == 0)		/* Nothing to escape; bail */
@@ -945,17 +1018,63 @@ xo_escape_json (xo_buffer_t *xbp, ssize_t len, xo_xff_flags_t flags UNUSED)
 	cp -= 1;
 	ip -= 1;
 
-	if (*cp == '\\' || *cp == '"') {
+	unsigned char ch = *cp;
+
+	if (ch == '\\' || ch == '"') {
 	    *ip-- = *cp;
 	    *ip = '\\';
-	} else if (*cp == '\n') {
-	    *ip-- = 'n';
+
+	} else if (ch == '/' && (flags & XFF_ESC_SLASH)) {
+	    *ip-- = *cp;
 	    *ip = '\\';
-	} else if (*cp == '\r') {
-	    *ip-- = 'r';
-	    *ip = '\\';
-	} else {
+
+	} else if ((unsigned) ch >= 0x20) { /* Beware of types here */
 	    *ip = *cp;
+
+	} else {
+	    char ih = 0;
+
+	    switch (ch) {
+	    case '\b':
+		ih = 'b';
+		break;
+
+	    case '\f':
+		ih = 'f';
+		break;
+
+	    case '\n':
+		ih = 'n';
+		break;
+
+	    case '\r':
+		ih = 'r';
+		break;
+
+	    case '\t':
+		ih = 't';
+		break;
+
+	    case '\0':
+		ip += 1;	/* Undo the move */
+		continue;
+
+	    default:
+		{
+		    static const char hexstr[] = "0123456789abcdef";
+		    *ip-- = hexstr[ch & 0x0F];
+		    *ip-- = hexstr[(ch >> 4) & 0x0F];
+		    *ip-- = '0';
+		    *ip-- = '0';
+		    *ip-- = 'u';
+		    *ip = '\\';
+		}
+	    }
+
+	    if (ih) {
+		*ip-- = ih;
+		*ip = '\\';
+	    }
 	}
 	
     } while (cp > ep && cp != ip);
@@ -2233,6 +2352,7 @@ static xo_flag_mapping_t xo_xof_names[] = {
     { XOF_NO_LOCALE, "no-locale" },
     { XOF_RETAIN_NONE, "no-retain" },
     { XOF_NO_TOP, "no-top" },
+    { XOF_NO_TOP_LEVEL, "no-top-level" },
     { XOF_NOT_FIRST, "not-first" },
     { XOF_PRETTY, "pretty" },
     { XOF_RETAIN_ALL, "retain" },
@@ -4748,6 +4868,9 @@ xo_format_value (xo_handle_t *xop, const char *name, ssize_t nlen,
     int pretty = XOF_ISSET(xop, XOF_PRETTY);
     int quote;
 
+    /* Passing NULL to memcpy is undefined behavior, so make a fake here */
+    const char *rname = name ?: "";
+
     /*
      * Before we emit a value, we need to know that the frame is ready.
      */
@@ -4761,7 +4884,7 @@ xo_format_value (xo_handle_t *xop, const char *name, ssize_t nlen,
 	if ((xsp->xs_flags & (XSF_EMIT | XSF_EMIT_KEY))
 	    || !(xsp->xs_flags & XSF_EMIT_LEAF_LIST)) {
 	    char nbuf[nlen + 1];
-	    memcpy(nbuf, name, nlen);
+	    memcpy(nbuf, rname, nlen);
 	    nbuf[nlen] = '\0';
 
 	    ssize_t rc = xo_transition(xop, 0, nbuf, XSS_EMIT_LEAF_LIST);
@@ -4785,7 +4908,7 @@ xo_format_value (xo_handle_t *xop, const char *name, ssize_t nlen,
 
 	} else if (!(xsp->xs_flags & XSF_EMIT_KEY)) {
 	    char nbuf[nlen + 1];
-	    memcpy(nbuf, name, nlen);
+	    memcpy(nbuf, rname, nlen);
 	    nbuf[nlen] = '\0';
 
 	    ssize_t rc = xo_transition(xop, 0, nbuf, XSS_EMIT);
@@ -4803,7 +4926,7 @@ xo_format_value (xo_handle_t *xop, const char *name, ssize_t nlen,
 	if ((xsp->xs_flags & XSF_EMIT_LEAF_LIST)
 	    || !(xsp->xs_flags & XSF_EMIT)) {
 	    char nbuf[nlen + 1];
-	    memcpy(nbuf, name, nlen);
+	    memcpy(nbuf, rname, nlen);
 	    nbuf[nlen] = '\0';
 
 	    ssize_t rc = xo_transition(xop, 0, nbuf, XSS_EMIT);
@@ -5858,6 +5981,7 @@ static xo_flag_mapping_t xo_modifier_names[] = {
     { XFF_COMMA, "comma" },
     { XFF_DISPLAY_ONLY, "display" },
     { XFF_ENCODE_ONLY, "encoding" },
+    { XFF_ESC_SLASH, "escape-slash" },
     { XFF_GT_FIELD, "gettext" },
     { XFF_HUMANIZE, "humanize" },
     { XFF_HUMANIZE, "hn" },
@@ -8447,6 +8571,11 @@ xo_transition (xo_handle_t *xop, xo_xof_flags_t flags, const char *name,
 	break;
 
     case XSS_TRANSITION(XSS_INIT, XSS_EMIT):
+	/* Missing a top-level container, so we must fake one */
+	if (!XOF_ISSET(xop, XOF_NO_TOP_LEVEL)) {
+	    xo_failure(xop, "emitting a field before a top-level tag");
+	    rc = xo_do_open_container(xop, flags, XO_FAKE_TOP_LEVEL_NAME);
+	}
 	break;
 
     case XSS_TRANSITION(XSS_OPEN_LEAF_LIST, XSS_EMIT):
