@@ -19,20 +19,24 @@
  * items in the blob, since we know it can be realloced (moved).
  */
 
-typedef unsigned xo_xparse_node_type_t;
+typedef uint16_t xo_xparse_token_t;
+typedef uint16_t xo_xparse_flags_t;
 typedef xo_off_t xo_xparse_str_id_t;
 typedef xo_off_t xo_xparse_node_id_t;
-typedef uint32_t xo_xparse_token_t;
 
 typedef void (*xo_xpath_warn_func_t)(void *data, const char *, va_list);
 
 typedef struct xo_xparse_node_s {
     xo_xparse_token_t xn_type;	/* Type of this node (token) */
+    xo_xparse_flags_t xn_flags;	/* Flags of this node (XXPF_*) */
     xo_off_t xn_str;		/* String value (in xd_str_buf) */
     xo_xparse_node_id_t xn_contents; /* Child node (main) (in xd_node_buf) */
     xo_xparse_node_id_t xn_next; /* Next node (in xd_node_buf) */
     xo_xparse_node_id_t xn_prev; /* Previous node (in xd_node_buf) */
 } xo_xparse_node_t;
+
+/* Flags for xn_flags */
+#define XXPF_USES_DOT  (1<<0)	/* A predicate that uses "." (L_DOT) */
 
 typedef struct xo_xparse_data_s {
     xo_handle_t *xd_xop;	/* libxo handle */
@@ -63,6 +67,8 @@ typedef struct xo_xparse_data_s {
 
     xo_xpath_warn_func_t xd_warn_func; /* Function to emit warnings */
     void *xd_warn_data;	       /* Opaque data passed to xd_warn_func */
+
+    const int *xd_unsupported_tokens; /* Tokens that we don't support */
 } xo_xparse_data_t;
 
 /* Flags for xd_flags */
@@ -191,7 +197,8 @@ xo_xparse_token_translate (xo_xparse_token_t ttype);
  * Return a better class of error message
  */
 char *
-xo_xparse_expecting_error (const char *token, int yystate, int yychar);
+xo_xparse_expecting_error (xo_xparse_data_t *xdp, const char *token,
+			   int yystate, int yychar);
 
 /*
  * Is the given character valid inside variable names (T_VAR)?
@@ -222,6 +229,23 @@ xo_xparse_node_set_str (xo_xparse_data_t *xdp, xo_xparse_node_id_t id,
     }
 }
 
+static inline void
+xo_xparse_node_set_flags (xo_xparse_data_t *xdp, xo_xparse_node_id_t id,
+			  xo_xparse_flags_t flags)
+{
+    if (id) {
+	xo_xparse_node_t *xnp = xo_xparse_node(xdp, id);
+	xnp->xn_flags |= flags;
+    }
+}
+
+/*
+ * Return TRUE if the subtree rooted at 'id' contains a context-node
+ * reference ('.', L_DOT).
+ */
+int
+xo_xparse_node_contains_dot (xo_xparse_data_t *xdp, xo_xparse_node_id_t id);
+
 void
 xo_xparse_node_set_next (xo_xparse_data_t *xdp, xo_xparse_node_id_t id,
 			 xo_xparse_node_id_t value);
@@ -240,7 +264,7 @@ xo_xparse_node_contents (xo_xparse_data_t *xdp, xo_xparse_node_id_t id)
     return xnp->xn_contents;
 }
 
-static inline xo_xparse_node_type_t
+static inline xo_xparse_token_t
 xo_xparse_node_type (xo_xparse_data_t *xdp, xo_xparse_node_id_t id)
 {
     if (id == 0)
@@ -349,5 +373,8 @@ xo_xparse_set_input (xo_xparse_data_t *xdp, const char *buf, xo_ssize_t len);
 int
 xo_xparse_parse_string (xo_handle_t *xop, xo_xparse_data_t *xdp,
 			const char *input);
+void
+xo_xparse_set_unsupported_tokens (xo_xparse_data_t *xdp,
+				  int *unsupported_tokens);
 
 #endif /* XO_XPARSE_H */

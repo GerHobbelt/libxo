@@ -618,18 +618,6 @@ extern const char xo_version[];	      /** Base version triple string */
 extern const char xo_version_extra[]; /** Extra version magic content */
 
 /**
- * @brief Dump the internal stack of a libxo handle.
- *
- * This diagnostic function is something I will ask you to call from
- * your program when you write to tell me libxo has gone bat-stink
- * crazy and has discarded your list or container or content.  Output
- * content will be what we lovingly call "developer entertainment".
- * @param[in] xop A valid libxo handle, or NULL for the default handle
- */
-void
-xo_dump_stack (xo_handle_t *xop);
-
-/**
  * @brief Recode the name of the program, suitable for error output.
  *
  * libxo will record the given name for use while generating error
@@ -740,5 +728,11 @@ xo_map_add_file (xo_handle_t *xop, const char *fname);
 
 int
 xo_add_filter (xo_handle_t *xop, const char *vp);
+
+int
+xo_discarding_output_h (xo_handle_t *xop);
+
+int
+xo_discarding_output (void);
 
 #endif /* INCLUDE_XO_H */

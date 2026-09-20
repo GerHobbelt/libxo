@@ -109,6 +109,7 @@ typedef struct xo_tframe_s {
     ssize_t xtf_attrs_len;
     char *xtf_self;		/* this node's own value (for '.' in predicates) */
     ssize_t xtf_self_len;
+    uint8_t xtf_dot_count;	/* # matched slots whose predicate uses '.' */
     uint32_t xtf_position_cur;  /* scratch: position for current C_INDEX eval */
     /* Child sibling counters (tracked in the PARENT frame, survive close) */
     uint8_t xtf_child_ncount;
@@ -650,8 +651,42 @@ xo_pred_has_trailing_cindex (xo_filter_t *xfp, xo_xparse_node_id_t pred_id)
     return FALSE;
 }
 
+/*
+ * Does this node's predicate chain reference the context node ('.')?  The
+ * grammar marks such C_PREDICATE nodes with XXPF_USES_DOT at parse time.
+ */
+static int
+xo_pred_uses_dot (xo_filter_t *xfp, xo_xparse_node_id_t pred)
+{
+    xo_xparse_node_t *xnp;
+
+    for ( ; pred; pred = xnp->xn_next) {
+	xnp = xo_xparse_node(&xfp->xf_xd, pred);
+	if (xnp->xn_type == C_PREDICATE && (xnp->xn_flags & XXPF_USES_DOT))
+	    return TRUE;
+    }
+
+    return FALSE;
+}
+
+/*
+ * Record a matched predicate slot: if it references '.', the frame must hold
+ * this node's own value before the eager eval reads it (via xo_eval_dot).
+ * We stash the value only once per frame and count such slots.
+ */
 static void
-xo_tmatch_open (xo_handle_t *xop, xo_filter_t *xfp UNUSED,
+xo_tmatch_note_pred (xo_filter_t *xfp, xo_tframe_t *frame,
+		     xo_xparse_node_id_t pred,
+		     const char *value, ssize_t vlen)
+{
+    if (xo_pred_uses_dot(xfp, pred)) {
+	if (frame->xtf_dot_count++ == 0)
+	    xo_tframe_set_self(frame, value, vlen);
+    }
+}
+
+static void
+xo_tmatch_open (xo_handle_t *xop, xo_filter_t *xfp,
 		xo_tmatch_t *xtmp, const char *tag, ssize_t tlen,
 		const char *value, ssize_t vlen)
 {
@@ -672,12 +707,6 @@ xo_tmatch_open (xo_handle_t *xop, xo_filter_t *xfp UNUSED,
     xtmp->xtm_depth += 1;
     xo_tframe_t *frame = &xtmp->xtm_stack[xtmp->xtm_depth];
     bzero(frame, sizeof(*frame));
-
-    /*
-     * Stash this node's own value so a '.' reference in a predicate on
-     * this node can resolve to it during the eager eval below.
-     */
-    xo_tframe_set_self(frame, value, vlen);
 
     xo_dbg(xop, "xo_tmatch_open: depth %u tag '%.*s'",
 	   xtmp->xtm_depth, tlen, tag);
@@ -702,6 +731,7 @@ xo_tmatch_open (xo_handle_t *xop, xo_filter_t *xfp UNUSED,
 	    frame->xtf_position[s] = position;
 
 	    if (tn->xtn_pred) {
+		xo_tmatch_note_pred(xfp, frame, tn->xtn_pred, value, vlen);
 		frame->xtf_position_cur = position;
 		frame->xtf_state[s] =
 		    xo_tmatch_try_eager(xop, xfp, frame, tn->xtn_pred,
@@ -743,6 +773,7 @@ xo_tmatch_open (xo_handle_t *xop, xo_filter_t *xfp UNUSED,
 	frame->xtf_position[s] = position;
 
 	if (tn->xtn_pred) {
+	    xo_tmatch_note_pred(xfp, frame, tn->xtn_pred, value, vlen);
 	    frame->xtf_position_cur = position;
 	    frame->xtf_state[s] =
 		xo_tmatch_try_eager(xop, xfp, frame, tn->xtn_pred, tn, xtmp);
@@ -793,6 +824,15 @@ static xo_filter_status_t xo_tmatch_attr(xo_handle_t *, xo_filter_t *,
 static int
 xo_filter_op_add_one (xo_handle_t *xop, const char *input)
 {
+    static int unsupported_tokens[] = {
+	L_DOTDOT, L_DOTDOTDOT,
+	K_COMMENT, K_ID, K_KEY, K_NODE,
+	K_PROCESSING_INSTRUCTION, K_TEXT, L_DSLASH,
+	T_AXIS_NAME, T_VAR, M_SEQUENCE, C_DESCENDANT,
+	C_TEST, C_UNION, C_NESTED_PREDICATES, C_PREDICATE_PATHS,
+	0
+    };
+
     xo_filter_t *xfp = xo_get_filter_data(xop, TRUE);
     if (xfp == NULL)
 	return -1;
@@ -800,18 +840,11 @@ xo_filter_op_add_one (xo_handle_t *xop, const char *input)
     xo_xparse_data_t *xdp = xo_filter_xparse_data(xop, xfp);
     int start = xdp->xd_paths_cur;
 
+    xo_xparse_set_unsupported_tokens(xdp, unsupported_tokens);
+
     int rc = xo_xparse_parse_string(xop, xdp, input);
 
     if (rc == 0) {
-	static int unsupported_tokens[] = {
-	    L_DOTDOT, L_DOTDOTDOT,
-	    K_COMMENT, K_ID, K_KEY, K_NODE,
-	    K_PROCESSING_INSTRUCTION, K_TEXT,
-	    T_AXIS_NAME, T_VAR, M_SEQUENCE, C_DESCENDANT,
-	    C_TEST, C_UNION, C_NESTED_PREDICATES, C_PREDICATE_PATHS,
-	    0
-	};
-
 	rc = xo_xpath_feature_warn_since(NULL, xdp, start,
 					 unsupported_tokens, "");
     }
