@@ -257,6 +257,10 @@ typedef struct xo_stack_s {
     xo_xsf_flags_t xs_rb_flags; /* Parent XSF_RB_BITS  at rb-marker time */
     char *xs_name;		/* Name (for XPath value) */
     char *xs_keys;		/* XPath predicate for any key fields */
+    char *xs_sibnames;		/* NUL-separated names used by this
+				   frame's container/list/value children
+				   so far; only populated when XOF_WARN
+				   is set (see xo_sibling_add) */
     char xs_namebuf[XO_XS_NAMESIZE]; /* Buffer for small xs_names */
     xo_ident_t xs_ident;	/* HTML: id for list/instances */
 } xo_stack_t;
@@ -4841,6 +4845,83 @@ xo_key_is_duplicate (const char *name, ssize_t nlen, const char *keys)
     return FALSE;
 }
 
+/*
+ * Append a name to a frame's xs_sibnames buffer, growing it as needed.
+ * Each entry is a one-byte marker (' ') followed by the NUL-terminated
+ * name; see xo_sibling_check() for how the marker is used.  The buffer
+ * holds a run of such entries followed by one more NUL byte marking the
+ * end of the run, so a scan always has a safe stopping point.  Only
+ * called when XOF_WARN is set, so this cost isn't paid otherwise.
+ */
+static void
+xo_sibling_add (xo_stack_t *xsp, const char *name, ssize_t nlen)
+{
+    ssize_t olen = 0;
+
+    if (xsp->xs_sibnames != NULL) {
+	const char *cp = xsp->xs_sibnames;
+	while (*cp != '\0') {
+	    ssize_t elen = (ssize_t) strlen(cp + 1) + 2;
+	    cp += elen;
+	    olen += elen;
+	}
+    }
+
+    char *cp = xo_realloc(xsp->xs_sibnames, olen + nlen + 3);
+    if (cp == NULL)
+	return;
+
+    cp[olen] = ' ';
+    memcpy(cp + olen + 1, name, nlen);
+    cp[olen + 1 + nlen] = '\0';
+    cp[olen + 1 + nlen + 1] = '\0';
+    xsp->xs_sibnames = cp;
+}
+
+/*
+ * Record a sibling name usage in xsp->xs_sibnames and report whether this
+ * occurrence should generate a "duplicate sibling name" warning.
+ *
+ * Each recorded name carries a one-byte marker: ' ' means the name has
+ * been seen exactly once so far, '+' means a duplicate use of it has
+ * already been warned about.  This lets a name be reused many times
+ * (e.g. a field emitted in a loop that isn't a proper list) while only
+ * ever warning once, instead of once per repeat.
+ *
+ *   - name not yet recorded: record it (marker ' '), return FALSE --
+ *     nothing to warn about on a first use.
+ *   - name recorded with marker ' ': this is the first duplicate; flip
+ *     the marker to '+' and return TRUE so the caller warns once.
+ *   - name recorded with marker '+': already warned about; return FALSE.
+ *
+ * Only ever called when XOF_WARN is set, so this cost isn't paid otherwise.
+ */
+static int
+xo_sibling_check (xo_stack_t *xsp, const char *name, ssize_t nlen)
+{
+    static const char *safe_dups[]
+	= { "error", "__error", "__warning", "message", NULL };
+
+    /* If the name is in our "safe" list, ignore it */
+    for (const char **sdp = safe_dups; *sdp; sdp++)
+	if (strncmp(*sdp, name, nlen) == 0)
+	    return FALSE;
+
+    ssize_t elen;
+    for (char *cp = xsp->xs_sibnames; cp && *cp; cp += elen + 2) {
+	elen = (ssize_t) strlen(cp + 1);
+	if (elen == nlen && strncmp(cp + 1, name, nlen) == 0) {
+	    if (cp[0] == '+')
+		return FALSE;
+	    cp[0] = '+';
+	    return TRUE;
+	}
+    }
+
+    xo_sibling_add(xsp, name, nlen);
+    return FALSE;
+}
+
 static void
 xo_build_predicate (xo_handle_t *xop, const char *name, ssize_t nlen,
 		    const char *encoding, ssize_t elen,
@@ -6864,6 +6945,22 @@ xo_format_value (xo_handle_t *xop, const xo_field_info_t *xfip,
 	    xsp = xo_stack_cur(xop);
 	    xsp->xs_flags |= XSF_EMIT;
 	}
+    }
+
+    /*
+     * Warn if this V-role field reuses a name already used (and possibly
+     * retired) by an earlier sibling under the same parent.  Other field
+     * roles (title, label, color, ...) are decorative and don't produce
+     * a named node; display-only fields never reach XML/JSON; leaf-lists
+     * are their own light-weight construct and are exempt.  Gated on
+     * XOF_WARN so the xs_sibnames bookkeeping is only paid for when
+     * warnings are actually enabled.
+     */
+    if (XOF_ISSET(xop, XOF_WARN) && name != NULL
+	    && xfip != NULL && xfip->xfi_ftype == 'V'
+	    && !(flags & (XFF_DISPLAY_ONLY | XFF_LEAF_LIST))) {
+	if (xo_sibling_check(xsp, name, nlen))
+	    xo_failure(xop, "duplicate sibling name: '%.*s'", (int) nlen, name);
     }
 
     xo_buffer_t *xbp = &xop->xo_data;
@@ -9083,6 +9180,23 @@ xo_depth_change (xo_handle_t *xop, const char *name,
 
 	xo_stack_t *old_xsp = &xop->xo_stack[xop->xo_depth];
 	xo_stack_t *xsp = &xop->xo_stack[xop->xo_depth + delta];
+
+	/*
+	 * Warn if this container/list reuses a name already used (and
+	 * possibly retired) by an earlier sibling under the same parent.
+	 * Instances and leaf-lists are exempt: instances are expected to
+	 * repeat their list's own name, and leaf-lists are their own
+	 * light-weight construct.  Gated on XOF_WARN so the xs_sibnames
+	 * bookkeeping (and its realloc/scan cost) is only paid when
+	 * warnings are actually enabled.
+	 */
+	if (XOF_ISSET(xop, XOF_WARN) && name != NULL
+	        && (state == XSS_OPEN_CONTAINER || state == XSS_OPEN_LIST)) {
+	    ssize_t nlen = strlen(name);
+	    if (xo_sibling_check(old_xsp, name, nlen))
+		xo_failure(xop, "duplicate sibling name: '%s'", name);
+	}
+
 	xsp->xs_flags = flags;
 	xsp->xs_state = state;
 	xsp->xs_fstatus = fstatus;
@@ -9164,6 +9278,10 @@ xo_depth_change (xo_handle_t *xop, const char *name,
 	if (xsp->xs_keys) {
 	    xo_free(xsp->xs_keys);
 	    xsp->xs_keys = NULL;
+	}
+	if (xsp->xs_sibnames) {
+	    xo_free(xsp->xs_sibnames);
+	    xsp->xs_sibnames = NULL;
 	}
     }
 
