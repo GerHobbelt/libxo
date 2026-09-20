@@ -536,7 +536,6 @@ static void
 xo_filter_op_destroy (xo_handle_t *xop, xo_filter_t *xfp)
 {
     xo_xparse_clean(&xfp->xf_xd);
-
     xo_tmatch_cleanup(&xfp->xf_tmatch);
     xo_trie_free(xfp->xf_trie);
     xfp->xf_trie = NULL;
@@ -976,7 +975,7 @@ typedef struct xo_eval_value_s {
 	int64_t xevd_int64;	    /* If C_INT64 */
 	uint64_t xevd_uint64;	    /* If C_UINT64 or C_INDEX or C_BOOLEAN */
 	xo_float_t xevd_float;	    /* If C_FLOAT */
-	const char *xevd_str;	    /* If C_STRING */
+	const char *xevd_str;	    /* If C_STRING or C_DSTRING */
     } xev_data;
 } xo_eval_value_t;
 
@@ -990,6 +989,9 @@ typedef struct xo_eval_value_s {
 #define XEVF_MISSING	(1<<1) /* A referenced element is missing  */
 #define XEVF_UNSUPPORTED (1<<2) /* Token type is not supported */
 #define XEVF_FINAL	(1<<3)  /* This is the final answer */
+
+/* C_DSTRING: a C_STRING whose xev_str is malloc'd and owned by this value */
+#define C_DSTRING	83
 
 #define XO_EVAL_VALUE_ZERO { .xev_type = C_INT64, .xev_flags = 0 }
 #define XO_EVAL_VALUE_FLOAT { .xev_type = C_FLOAT, .xev_flags = 0 }
@@ -1016,8 +1018,9 @@ typedef xo_eval_value_t (*xo_eval_op_fn_t)(XO_EVAL_OP_ARGS);
 
 #define XO_EVAL_NODE_ARGS \
     xo_handle_t *xop UNUSED, xo_filter_t *xfp UNUSED, xo_match_t *xmp UNUSED, \
-	xo_xparse_node_t *xnp UNUSED, int indent UNUSED
-#define XO_EVAL_NODE_PASS xop, xfp, xmp, xnp, indent
+	xo_xparse_node_t *xnp UNUSED, int indent UNUSED, \
+	int argc UNUSED, xo_eval_value_t *argv UNUSED
+#define XO_EVAL_NODE_PASS xop, xfp, xmp, xnp, indent, argc, argv
 
 typedef xo_eval_value_t (*xo_eval_node_fn_t)(XO_EVAL_NODE_ARGS);
 
@@ -1039,6 +1042,17 @@ xo_eval_value_make (unsigned type, unsigned flags, xo_xparse_node_id_t id)
     return value;
 }
 
+static inline void
+xo_eval_value_free (xo_eval_value_t v)
+{
+    if (v.xev_type == C_DSTRING) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-qual"
+	xo_free((char *) v.xev_str);
+#pragma GCC diagnostic pop
+    }
+}
+
 static inline xo_eval_value_t
 xo_eval_value_float (unsigned flags, xo_float_t val)
 {
@@ -1047,6 +1061,18 @@ xo_eval_value_float (unsigned flags, xo_float_t val)
     value.xev_type = C_FLOAT;
     value.xev_flags = flags;
     value.xev_float = val;
+
+    return value;
+}
+
+static inline xo_eval_value_t
+xo_eval_value_string (int stype, unsigned flags, const char *str)
+{
+    xo_eval_value_t value = XO_EVAL_VALUE_ZERO;
+
+    value.xev_type = stype;
+    value.xev_flags = flags;
+    value.xev_str = str;
 
     return value;
 }
@@ -1198,6 +1224,7 @@ static int
 xo_eval_cast_boolean (xo_filter_t *xfp UNUSED, xo_eval_value_t value)
 {
     switch (value.xev_type) {
+    case C_DSTRING:
     case C_STRING:;
 	const char *str = value.xev_str;
 	char *ep;
@@ -1218,6 +1245,7 @@ xo_eval_cast_float (xo_filter_t *xfp UNUSED, xo_eval_value_t value)
     xo_float_t fval = 0;
 
     switch (value.xev_type) {
+    case C_DSTRING:
     case C_STRING:;
 	const char *str = value.xev_str;
 	char *ep;
@@ -1247,6 +1275,7 @@ xo_eval_cast_string (xo_filter_t *xfp UNUSED, xo_eval_value_t value)
 
     switch (value.xev_type) {
 
+    case C_DSTRING:
     case C_STRING:
 	bp = value.xev_str;
 	break;
@@ -1291,6 +1320,7 @@ xo_eval_dump_value (xo_handle_t *xop UNUSED, xo_filter_t *xfp UNUSED,
 
     switch (value.xev_type) {
 
+    case C_DSTRING:
     case C_STRING:
 	bp = value.xev_str;
 	break;
@@ -1341,7 +1371,10 @@ xo_eval_compare (XO_EVAL_OP_ARGS)
     xo_eval_dump_value(xop, xfp, left, indent, "compare: left");
     xo_eval_dump_value(xop, xfp, right, indent, "compare: right");
 
-    switch (TYPE_CMP(left.xev_type, right.xev_type)) {
+    unsigned left_type = (left.xev_type == C_DSTRING) ? C_STRING : left.xev_type;
+    unsigned right_type = (right.xev_type == C_DSTRING) ? C_STRING : right.xev_type;
+
+    switch (TYPE_CMP(left_type, right_type)) {
     case TYPE_CMP(C_STRING, C_STRING):
 	rc = strcmp(left.xev_str, right.xev_str);
 	break;
@@ -1636,8 +1669,9 @@ xo_eval_not (XO_EVAL_NODE_ARGS)
 	return value;
 
     int bool = xo_eval_cast_boolean(xfp, value);
-    value.xev_int64 = bool ? 0 : 1; /* Perform the 'not' */
+    xo_eval_value_free(value);
     value.xev_type = C_BOOLEAN;
+    value.xev_int64 = bool ? 0 : 1; /* Perform the 'not' */
     return value;
 }
 
@@ -1648,14 +1682,14 @@ static int UNUSED
 xo_eval_argument_count (XO_EVAL_NODE_ARGS)
 {
     xo_xparse_node_id_t id;
-    int argc = 0;
+    int count = 0;
 
-    for (id = xnp->xn_contents; id && argc > 0; id = xnp->xn_next) {
+    for (id = xnp->xn_contents; id; id = xnp->xn_next) {
 	xnp = xo_xparse_node(&xfp->xf_xd, id);
-	argc += 1;
+	count += 1;
     }
 
-    return argc;
+    return count;
 }
 
 /*
@@ -1664,12 +1698,12 @@ xo_eval_argument_count (XO_EVAL_NODE_ARGS)
  */
 static int
 xo_eval_arguments (XO_EVAL_NODE_ARGS,
-		   int argc, xo_eval_value_t *argv)
+		   int nargs, xo_eval_value_t *argp)
 {
     xo_xparse_node_id_t id;
     xo_eval_value_t value;
 
-    for (id = xnp->xn_contents; id && argc > 0; id = xnp->xn_next, argc--) {
+    for (id = xnp->xn_contents; id && nargs > 0; id = xnp->xn_next, nargs--) {
 	xnp = xo_xparse_node(&xfp->xf_xd, id);
 
 	if (XO_HAS_DEBUG(xop))
@@ -1679,29 +1713,26 @@ xo_eval_arguments (XO_EVAL_NODE_ARGS,
 			id, NULL);
 	xo_eval_dump_value(xop, xfp, value, XO_INDENT,
 			   "xo_eval_argument: working");
-	*argv++ = value;
+	*argp++ = value;
     }
 
-    for (; argc > 0; argc--)
-	*argv++ = xo_eval_value_invalid();
+    for (; nargs > 0; nargs--)
+	*argp++ = xo_eval_value_invalid();
 
     return (xnp && xnp->xn_next);
+}
+
+static void
+xo_eval_arguments_free (XO_EVAL_NODE_ARGS)
+{
+    for (int i = 0; i < argc; i++)
+	xo_eval_value_free(argv[i]);
 }
 
 static xo_eval_value_t
 xo_eval_func_starts_with (XO_EVAL_NODE_ARGS)
 {
-    const int argc = 2;
-    xo_eval_value_t argv[argc];
     xo_eval_value_t value = XO_EVAL_VALUE_BOOLEAN_FALSE;
-
-    xo_eval_arguments(XO_EVAL_NODE_PASS, argc, argv);
-
-    if ((argv[0].xev_flags & XEVF_MISSING)
-	|| (argv[1].xev_flags & XEVF_MISSING)) {
-	value.xev_flags = XEVF_MISSING;
-	return value;
-    }
 
     char *base = xo_eval_cast_string(xfp, argv[0]);
     char *start = xo_eval_cast_string(xfp, argv[1]);
@@ -1721,17 +1752,7 @@ xo_eval_func_starts_with (XO_EVAL_NODE_ARGS)
 static xo_eval_value_t
 xo_eval_func_ends_with (XO_EVAL_NODE_ARGS)
 {
-    const int argc = 2;
-    xo_eval_value_t argv[argc];
     xo_eval_value_t value = XO_EVAL_VALUE_BOOLEAN_FALSE;
-
-    xo_eval_arguments(XO_EVAL_NODE_PASS, argc, argv);
-
-    if ((argv[0].xev_flags & XEVF_MISSING)
-	|| (argv[1].xev_flags & XEVF_MISSING)) {
-	value.xev_flags = XEVF_MISSING;
-	return value;
-    }
 
     char *base = xo_eval_cast_string(xfp, argv[0]);
     char *start = xo_eval_cast_string(xfp, argv[1]);
@@ -1770,26 +1791,73 @@ xo_eval_func_false (XO_EVAL_NODE_ARGS)
 static xo_eval_value_t
 xo_eval_func_boolean (XO_EVAL_NODE_ARGS)
 {
-    xo_eval_value_t value = xo_eval_not(XO_EVAL_NODE_PASS);
-    if (value.xev_flags & XEVF_MISSING)
-	return value;
+    int bool = xo_eval_cast_boolean(xfp, argv[0]);
 
-    value.xev_int64 = value.xev_int64 ? 0 : 1;	/* invert not() */
+    xo_eval_value_t value = XO_EVAL_VALUE_BOOLEAN_FALSE;
+    value.xev_int64 = bool ? 1 : 0;
+    return value;
+}
+
+static xo_eval_value_t
+xo_eval_func_string (XO_EVAL_NODE_ARGS)
+{
+    char *str = xo_eval_cast_string(xfp, argv[0]);
+    return xo_eval_value_string(C_DSTRING, 0, str);
+}
+
+static xo_eval_value_t
+xo_eval_func_normalize_space (XO_EVAL_NODE_ARGS)
+{
+    char *str = xo_eval_cast_string(xfp, argv[0]);
+    const char *p = str ?: "";
+
+    char *out = xo_realloc(NULL, strlen(p) + 1);
+    if (out == NULL) {
+	xo_free(str);
+	xo_eval_value_t result = xo_eval_value_make(C_DSTRING, 0, 0);
+	result.xev_str = strdup("");
+	return result;
+    }
+
+    char *q = out;
+
+    while (isspace((unsigned char) *p))	/* strip leading whitespace */
+	p++;
+
+    while (*p) {
+	if (isspace((unsigned char) *p)) {
+	    *q++ = ' ';
+	    while (isspace((unsigned char) *p))
+		p++;
+	} else {
+	    *q++ = *p++;
+	}
+    }
+
+    if (q > out && q[-1] == ' ')	/* strip trailing whitespace */
+	q--;
+    *q = '\0';
+
+    xo_free(str);
+
+    xo_eval_value_t result = xo_eval_value_make(C_DSTRING, 0, 0);
+    result.xev_str = out;
+    return result;
+}
+
+static xo_eval_value_t
+xo_eval_func_not (XO_EVAL_NODE_ARGS)
+{
+    int bool = xo_eval_cast_boolean(xfp, argv[0]);
+    xo_eval_value_t value = XO_EVAL_VALUE_BOOLEAN_FALSE;
+    value.xev_int64 = bool ? 0 : 1;
     return value;
 }
 
 static xo_eval_value_t
 xo_eval_func_ceiling (XO_EVAL_NODE_ARGS)
 {
-    xo_eval_value_t value;
-
-    /* We only support a single element in the path, which must be a key */
-    value = xo_eval(xop, xfp, xmp, "arguments", indent,
-                       xnp->xn_contents, NULL);
-    if (value.xev_flags & XEVF_MISSING)
-	return value;
-
-    xo_float_t fval = xo_eval_cast_float(xfp, value);
+    xo_float_t fval = xo_eval_cast_float(xfp, argv[0]);
     fval = ceil(fval);
     return xo_eval_value_float(0, fval);
 }
@@ -1797,31 +1865,165 @@ xo_eval_func_ceiling (XO_EVAL_NODE_ARGS)
 static xo_eval_value_t
 xo_eval_func_floor (XO_EVAL_NODE_ARGS)
 {
-    xo_eval_value_t value;
-
-    /* We only support a single element in the path, which must be a key */
-    value = xo_eval(xop, xfp, xmp, "arguments", indent,
-                       xnp->xn_contents, NULL);
-    if (value.xev_flags & XEVF_MISSING)
-	return value;
-
-    xo_float_t fval = xo_eval_cast_float(xfp, value);
+    xo_float_t fval = xo_eval_cast_float(xfp, argv[0]);
     fval = floor(fval);
     return xo_eval_value_float(0, fval);
 }
 
 static xo_eval_value_t
-xo_eval_func_number (XO_EVAL_NODE_ARGS)
+xo_eval_func_substring_before (XO_EVAL_NODE_ARGS)
 {
-    xo_eval_value_t value;
+    xo_eval_value_t value = xo_eval_value_make(C_STRING, 0, 0);
 
-    /* We only support a single element in the path, which must be a key */
-    value = xo_eval(xop, xfp, xmp, "arguments", indent,
-                       xnp->xn_contents, NULL);
-    if (value.xev_flags & XEVF_MISSING)
+    char *haystack = xo_eval_cast_string(xfp, argv[0]);
+    char *needle = xo_eval_cast_string(xfp, argv[1]);
+    char *found = (haystack && needle) ? strstr(haystack, needle) : NULL;
+
+    if (found) {
+	value.xev_type = C_DSTRING;
+	value.xev_str = strndup(haystack, found - haystack);
+    } else {
+	value.xev_str = "";
+    }
+
+    xo_free(haystack);
+    xo_free(needle);
+    return value;
+}
+
+static xo_eval_value_t
+xo_eval_func_substring_after (XO_EVAL_NODE_ARGS)
+{
+    xo_eval_value_t value = xo_eval_value_make(C_STRING, 0, 0);
+
+    char *haystack = xo_eval_cast_string(xfp, argv[0]);
+    char *needle = xo_eval_cast_string(xfp, argv[1]);
+    char *found = (haystack && needle) ? strstr(haystack, needle) : NULL;
+
+    if (found) {
+	const char *after = found + strlen(needle);
+	value.xev_type = C_DSTRING;
+	value.xev_str = strdup(after);
+    } else {
+	value.xev_str = "";
+    }
+
+    xo_free(haystack);
+    xo_free(needle);
+    return value;
+}
+
+static xo_eval_value_t
+xo_eval_func_choose (XO_EVAL_NODE_ARGS)
+{
+    /* Evaluate the condition (first arg) */
+    xo_xparse_node_id_t cond_id = xnp->xn_contents;
+    xnp = xo_xparse_node(&xfp->xf_xd, cond_id);
+
+    xo_eval_value_t cond = xo_eval(xop, xfp, xmp, "choose-cond",
+				   indent + XO_INDENT, cond_id, NULL);
+    if (cond.xev_flags & XEVF_MISSING) {
+	xo_eval_value_free(cond);
+	return xo_eval_value_missing();
+    }
+
+    int bool = xo_eval_cast_boolean(xfp, cond);
+    xo_eval_value_free(cond);
+
+    /* Locate the then and else node ids */
+    xo_xparse_node_id_t then_id = xnp->xn_next;
+    xnp = xo_xparse_node(&xfp->xf_xd, then_id);
+    xo_xparse_node_id_t else_id = xnp->xn_next;
+
+    xo_xparse_node_id_t branch_id = bool ? then_id : else_id;
+    return xo_eval(xop, xfp, xmp, bool ? "choose-then" : "choose-else",
+		   indent + XO_INDENT, branch_id, NULL);
+}
+
+static xo_eval_value_t
+xo_eval_func_choose2 (XO_EVAL_NODE_ARGS)
+{
+    xo_xparse_node_id_t first_id = xnp->xn_contents;
+    xnp = xo_xparse_node(&xfp->xf_xd, first_id);
+    xo_xparse_node_id_t second_id = xnp->xn_next;
+
+    xo_eval_value_t value = xo_eval(xop, xfp, xmp, "choose2-first",
+				    indent + XO_INDENT, first_id, NULL);
+    if (!(value.xev_flags & XEVF_MISSING) && xo_eval_cast_boolean(xfp, value))
 	return value;
 
-    xo_float_t fval = xo_eval_cast_float(xfp, value);
+    xo_eval_value_free(value);
+    return xo_eval(xop, xfp, xmp, "choose2-second",
+		   indent + XO_INDENT, second_id, NULL);
+}
+
+static xo_eval_value_t
+xo_eval_func_concat (XO_EVAL_NODE_ARGS)
+{
+    xo_buffer_t buf;
+    xo_buf_init(&buf);
+
+    xo_xparse_node_id_t id;
+    int count = 0;
+
+    for (id = xnp->xn_contents; id; id = xnp->xn_next) {
+	xnp = xo_xparse_node(&xfp->xf_xd, id);
+	count += 1;
+
+	xo_eval_value_t value = xo_eval(xop, xfp, xmp, "concat-arg",
+					indent + XO_INDENT, id, NULL);
+	if (value.xev_flags & XEVF_MISSING) {
+	    xo_eval_value_free(value);
+	    xo_buf_cleanup(&buf);
+	    return xo_eval_value_missing();
+	}
+	char *str = xo_eval_cast_string(xfp, value);
+	if (str) {
+	    xo_buf_append(&buf, str, strlen(str));
+	    xo_free(str);
+	}
+	xo_eval_value_free(value);
+    }
+
+    if (count < 2) {
+	xo_failure(xop, "function 'concat' requires at least 2 arguments, got %d",
+		   count);
+	xo_buf_cleanup(&buf);
+	xo_eval_value_t false_val = XO_EVAL_VALUE_BOOLEAN_FALSE;
+	return false_val;
+    }
+
+    xo_buf_append(&buf, "", 1);	/* null terminator */
+    xo_eval_value_t result = xo_eval_value_make(C_DSTRING, 0, 0);
+    result.xev_str = strdup(xo_buf_data(&buf, 0));
+    xo_buf_cleanup(&buf);
+    return result;
+}
+
+static xo_eval_value_t
+xo_eval_func_contains (XO_EVAL_NODE_ARGS)
+{
+    xo_eval_value_t value = XO_EVAL_VALUE_BOOLEAN_FALSE;
+
+    char *haystack = xo_eval_cast_string(xfp, argv[0]);
+    char *needle = xo_eval_cast_string(xfp, argv[1]);
+    XO_DBG(xop, "contains: '%s' '%s'", haystack ?: "", needle ?: "");
+
+    if (haystack && needle && strstr(haystack, needle) != NULL)
+	value.xev_int64 = TRUE;
+
+    if (haystack)
+	xo_free(haystack);
+    if (needle)
+	xo_free(needle);
+
+    return value;
+}
+
+static xo_eval_value_t
+xo_eval_func_number (XO_EVAL_NODE_ARGS)
+{
+    xo_float_t fval = xo_eval_cast_float(xfp, argv[0]);
     return xo_eval_value_float(0, fval);
 }
 
@@ -1829,31 +2031,45 @@ xo_eval_func_number (XO_EVAL_NODE_ARGS)
  * Map between names and numbers and functions, searchable by string
  * name.
  */
+typedef uint32_t xo_eval_func_flags_t;
+
+#define XEFF_NO_EVAL	(1<<0)	/* Function evaluates its own args (no infra) */
+
 typedef struct xo_eval_func_map_s {
     xo_eval_node_fn_t xfm_func;	/* The function that implements the logic */
     const char *xfm_name;	/* Name (e.g. "plus") */
+    xo_eval_func_flags_t xfm_flags; /* Flags (XEFF_*) */
+    int xfm_nargs;		/* Required arg count; -1 means function checks */
 } xo_eval_func_map_t;
 
 xo_eval_func_map_t xo_eval_functions[] = {
-    { xo_eval_func_boolean, "boolean" },
-    { xo_eval_func_ceiling, "ceiling" },
-    { xo_eval_func_ends_with, "ends-with" },
-    { xo_eval_func_false, "false" },
-    { xo_eval_func_floor, "floor" },
-    { xo_eval_not, "not" },
-    { xo_eval_func_number, "number" },
-    { xo_eval_func_starts_with, "starts-with" },
-    { xo_eval_func_true, "true" },
-    
-    { NULL, NULL }
+    { xo_eval_func_boolean, "boolean", 0, 1 },
+    { xo_eval_func_ceiling, "ceiling", 0, 1 },
+    { xo_eval_func_choose, "choose", XEFF_NO_EVAL, 3 },
+    { xo_eval_func_choose2, "choose2", XEFF_NO_EVAL, 2 },
+    { xo_eval_func_concat, "concat", XEFF_NO_EVAL, -1 },
+    { xo_eval_func_contains, "contains", 0, 2 },
+    { xo_eval_func_ends_with, "ends-with", 0, 2 },
+    { xo_eval_func_false, "false", 0, 0 },
+    { xo_eval_func_floor, "floor", 0, 1 },
+    { xo_eval_func_normalize_space, "normalize-space", 0, 1 },
+    { xo_eval_func_not, "not", 0, 1 },
+    { xo_eval_func_number, "number", 0, 1 },
+    { xo_eval_func_string, "string", 0, 1 },
+    { xo_eval_func_starts_with, "starts-with", 0, 2 },
+    { xo_eval_func_substring_after, "substring-after", 0, 2 },
+    { xo_eval_func_substring_before, "substring-before", 0, 2 },
+    { xo_eval_func_true, "true", 0, 0 },
+
+    { NULL, NULL, 0, 0 }
 };
 
-static xo_eval_node_fn_t
+static xo_eval_func_map_t *
 xo_eval_find_func (xo_eval_func_map_t *map, const char *name)
 {
     for ( ; map && map->xfm_func; map++)
 	if (map->xfm_name && xo_streq(map->xfm_name, name))
-	    return map->xfm_func;
+	    return map;
 
     return NULL;
 }
@@ -1861,22 +2077,55 @@ xo_eval_find_func (xo_eval_func_map_t *map, const char *name)
 static xo_eval_value_t
 xo_eval_function (XO_EVAL_NODE_ARGS)
 {
-    xo_eval_value_t value = { .xev_flags = 0 };
     const char *str = xo_xparse_str(&xfp->xf_xd, xnp->xn_str);
     if (str == NULL) {
 	xo_failure(xop, "unknown function in filter expression");
 	return xo_eval_value_invalid();
     }
 
-    xo_eval_node_fn_t func = xo_eval_find_func(xo_eval_functions, str);
-    xo_dbg(xop, "func %p", func);
-
-    if (func == NULL) {
+    xo_eval_func_map_t *entry = xo_eval_find_func(xo_eval_functions, str);
+    if (entry == NULL) {
 	xo_failure(xop, "unknown function in filter expression: '%s'", str);
 	return xo_eval_value_invalid();
     }
 
-    value = func(XO_EVAL_NODE_PASS);
+    int fn_argc = xo_eval_argument_count(XO_EVAL_NODE_PASS);
+
+    if (entry->xfm_nargs >= 0 && fn_argc != entry->xfm_nargs) {
+	xo_failure(xop, "function '%s' requires %d argument(s), got %d",
+		   str, entry->xfm_nargs, fn_argc);
+	xo_eval_value_t false_val = XO_EVAL_VALUE_BOOLEAN_FALSE;
+	return false_val;
+    }
+
+    xo_eval_value_t value;
+
+    if (entry->xfm_flags & XEFF_NO_EVAL) {
+	/* Function manages its own argument evaluation */
+	value = entry->xfm_func(xop, xfp, xmp, xnp, indent, 0, NULL);
+    } else {
+	/* Infra: allocate, evaluate all args, call, then free */
+	xo_eval_value_t *fn_argv = fn_argc
+	    ? xo_realloc(NULL, fn_argc * sizeof(*fn_argv)) : NULL;
+
+	xo_eval_arguments(XO_EVAL_NODE_PASS, fn_argc, fn_argv);
+
+	if (entry->xfm_nargs > 0) {
+	    for (int i = 0; i < fn_argc; i++) {
+		if (fn_argv[i].xev_flags & XEVF_MISSING) {
+		    xo_eval_arguments_free(xop, xfp, xmp, xnp, indent,
+					   fn_argc, fn_argv);
+		    xo_free(fn_argv);
+		    return xo_eval_value_missing();
+		}
+	    }
+	}
+
+	value = entry->xfm_func(xop, xfp, xmp, xnp, indent, fn_argc, fn_argv);
+
+	xo_eval_arguments_free(xop, xfp, xmp, xnp, indent, fn_argc, fn_argv);
+	xo_free(fn_argv);
+    }
 
     xo_eval_dump_value(xop, xfp, value, indent, str);
 
@@ -2001,7 +2250,7 @@ xo_eval (xo_handle_t *xop, xo_filter_t *xfp, xo_match_t *xmp,
 	}
 
 	if (node_fn)
-	    value = node_fn(xop, xfp, xmp, xnp, indent + XO_INDENT);
+	    value = node_fn(xop, xfp, xmp, xnp, indent + XO_INDENT, 0, NULL);
 	else if (nested_op_fn)
 	    value = xo_eval(xop, xfp, xmp, cname, indent + XO_INDENT,
 			    xnp->xn_contents, nested_op_fn);
@@ -2017,11 +2266,16 @@ xo_eval (xo_handle_t *xop, xo_filter_t *xfp, xo_match_t *xmp,
 	     */
 	    if ((last.xev_flags & XEVF_MISSING)
 		|| (value.xev_flags & XEVF_MISSING)) {
+		xo_eval_value_free(last);
+		xo_eval_value_free(value);
 		value = xo_eval_value_missing();
 
 	    } else {
-		value = op_fn(xop, xfp, xmp, xnp, pname,
-			      indent + XO_INDENT, last, value);
+		xo_eval_value_t result = op_fn(xop, xfp, xmp, xnp, pname,
+					       indent + XO_INDENT, last, value);
+		xo_eval_value_free(last);
+		xo_eval_value_free(value);
+		value = result;
 	    }
 	}
 
@@ -2159,7 +2413,9 @@ xo_tmatch_try_eager (xo_handle_t *xop, xo_filter_t *xfp,
     xo_eval_value_t result = xo_tmatch_eval_pred(xop, xfp, frame, pred);
     if (result.xev_flags & XEVF_MISSING)
 	return XTFS_PRED;
-    if (xo_eval_cast_boolean(xfp, result)) {
+    int live = xo_eval_cast_boolean(xfp, result);
+    xo_eval_value_free(result);
+    if (live) {
 	xo_tmatch_record_live(xm, frame, tn);
 	return XTFS_LIVE;
     }
@@ -2194,7 +2450,9 @@ xo_tmatch_key (xo_handle_t *xop, xo_filter_t *xfp, xo_tmatch_t *xm,
 	if (result.xev_flags & XEVF_MISSING)
 	    continue;
 
-	if (xo_eval_cast_boolean(xfp, result)) {
+	int live = xo_eval_cast_boolean(xfp, result);
+	xo_eval_value_free(result);
+	if (live) {
 	    frame->xtf_state[i] = XTFS_LIVE;
 	    xo_tmatch_record_live(xm, frame, tn);
 	} else {
@@ -2254,7 +2512,9 @@ xo_tmatch_attr (xo_handle_t *xop, xo_filter_t *xfp, xo_tmatch_t *xm,
 	if (result.xev_flags & XEVF_MISSING)
 	    continue;
 
-	if (xo_eval_cast_boolean(xfp, result)) {
+	int live = xo_eval_cast_boolean(xfp, result);
+	xo_eval_value_free(result);
+	if (live) {
 	    frame->xtf_state[i] = XTFS_LIVE;
 	    xo_tmatch_record_live(xm, frame, tn);
 	} else {
