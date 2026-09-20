@@ -81,6 +81,7 @@ AC_CHECK_FUNCS([strspn])
 AC_CHECK_FUNCS([sysctlbyname])
 AC_CHECK_FUNCS([uexterr_gettext])
 
+AC_CHECK_HEADERS([bsd/string.h])
 AC_CHECK_HEADERS([ctype.h])
 AC_CHECK_HEADERS([dlfcn.h])
 AC_CHECK_HEADERS([dlfcn.h])
@@ -95,6 +96,7 @@ AC_CHECK_HEADERS([stdtime/tzfile.h])
 AC_CHECK_HEADERS([string.h])
 AC_CHECK_HEADERS([sys/exterrvar.h])
 AC_CHECK_HEADERS([sys/param.h])
+AC_CHECK_HEADERS([sys/queue.h], , [AC_MSG_ERROR([Could not find <sys/queue.h>])])
 AC_CHECK_HEADERS([sys/sysctl.h])
 AC_CHECK_HEADERS([sys/time.h])
 AC_CHECK_HEADERS([threads.h])
@@ -241,8 +243,6 @@ if test "$GETTEXT_ENABLE" != "no"; then
              [HAVE_GETTEXT=no])
   CFLAGS="$_save_cflags"
 
-  AC_MSG_RESULT([$HAVE_GETTEXT])
-
   if test "$HAVE_GETTEXT" != "yes"; then
       GETTEXT_PREFIX=/opt/local
       AC_MSG_CHECKING([gettext in ${GETTEXT_PREFIX}])
@@ -300,8 +300,11 @@ else
     dnl gettext may live in libc (glibc); msgfmt can be elsewhere on PATH
     AC_PATH_PROG([MSGFMT], [msgfmt])
     AS_IF([test -n "$MSGFMT"], [GETTEXT_BINDIR=`AS_DIRNAME([$MSGFMT])`],
-          [AC_MSG_FAILURE([could not find msgfmt tool])])
+          [HAVE_GETTEXT=no])
 fi
+
+AC_MSG_CHECKING([final result for gettext])
+AC_MSG_RESULT([$HAVE_GETTEXT])
 AC_SUBST(GETTEXT_BINDIR)
 
 AM_CONDITIONAL([HAVE_GETTEXT], [test "$HAVE_GETTEXT" = "yes"])

@@ -1,4 +1,5 @@
 /*
+ * SPDX-License-Identifier: BSD-2-Clause
  * Copyright (c) 2014-2023, Juniper Networks, Inc.
  * All rights reserved.
  * This SOFTWARE is licensed under the LICENSE provided in the
@@ -43,15 +44,7 @@
 #include <getopt.h>
 
 #include "xo_config.h"
-
-#ifdef HAVE_GCC
-#define _GNU_SOURCE
-#define __USE_GNU 1
-#include <string.h>
-#include <bsd/string.h>
-#else /* HAVE_GCC */
-#include <string.h>
-#endif /* HAVE_GCC */
+#include <libxo/xo_string.h>
 
 #ifdef HAVE_LANGINFO_H
 #include <langinfo.h>

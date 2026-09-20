@@ -1,4 +1,5 @@
 /*
+ * SPDX-License-Identifier: BSD-2-Clause
  * Copyright (c) 2014-2018, Juniper Networks, Inc.
  * All rights reserved.
  * This SOFTWARE is licensed under the LICENSE provided in the
@@ -19,6 +20,10 @@
 
 #ifndef INCLUDE_XO_H
 #define INCLUDE_XO_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif /* __cplusplus */
 
 #include <stdio.h>
 #include <sys/types.h>
@@ -912,5 +917,9 @@ xo_is_emitting (void);
 
 void
 xo_set_no_cache (int value);
+
+#ifdef __cplusplus
+}
+#endif /* __cplusplus */
 
 #endif /* INCLUDE_XO_H */
