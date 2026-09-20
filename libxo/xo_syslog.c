@@ -63,6 +63,10 @@
 #include <sys/sysctl.h>
 #endif /* HAVE_SYSCTLBYNAME */
 
+#ifdef HAVE_GCC
+#include <bsd/string.h>
+#endif /* HAVE_GCC */
+
 #include "xo.h"
 #include "xo_private.h"
 #include "xo_encoder.h"		/* For xo_realloc */

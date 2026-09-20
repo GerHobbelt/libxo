@@ -20,6 +20,12 @@
 #include <locale.h>
 #include <libintl.h>
 
+#include "xo_config.h"
+
+#ifdef HAVE_GCC
+#include <bsd/string.h>
+#endif /* HAVE_GCC */
+
 #include "xo.h"
 #include "xo_encoder.h"
 
