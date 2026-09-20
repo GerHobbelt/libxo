@@ -16,7 +16,14 @@
 #include <string.h>
 #include <sys/param.h>
 
+#include "xo_config.h"
+
+/*
+ * Even if xo_config.h didn't ask for filters, we'll need it to build here
+ */
+#ifndef LIBXO_NEED_FILTERS
 #define LIBXO_NEED_FILTERS
+#endif /* LIBXO_NEED_FILTERS */
 
 #include "xo.h"
 #include "xo_private.h"
@@ -145,8 +152,8 @@ xo_encoder_wb_marker (xo_handle_t *xop, xo_whiteboard_op_t op,
 /*
  * Create and initialize a filter, attaching it to a handle
  */
-xo_filter_t *
-xo_filter_create (xo_handle_t *xop)
+static xo_filter_t *
+xo_filter_op_create (xo_handle_t *xop)
 {
     xo_filter_t *xfp = xo_realloc(NULL, sizeof(*xfp));
     if (xfp == NULL)
@@ -175,8 +182,8 @@ xo_filter_xparse_data (xo_handle_t *xop UNUSED, xo_filter_t *xfp)
 /*
  * Completely destroy and release a filter
  */
-void
-xo_filter_destroy (xo_handle_t *xop, xo_filter_t *xfp)
+static void
+xo_filter_op_destroy (xo_handle_t *xop, xo_filter_t *xfp)
 {
     xo_xparse_clean(&xfp->xf_xd);
 
@@ -308,18 +315,29 @@ xo_filter_state_name (uint32_t state)
 /*
  * Add a filter (xpath) to our filtering mechanism
  */
-int
-xo_filter_add_one (xo_handle_t *xop, const char *input)
+static int
+xo_filter_op_add_one (xo_handle_t *xop, const char *input)
 {
     xo_filter_t *xfp = xo_filter_data_get(xop, TRUE);
     if (xfp == NULL)
 	return -1;
 
     xo_xparse_data_t *xdp = xo_filter_xparse_data(xop, xfp);
+    int start = xdp->xd_paths_cur;
 
     int rc = xo_xparse_parse_string(xop, xdp, input);
 
-    
+    if (rc == 0) {
+	static int unsupported_tokens[] = {
+	    L_AT, L_DOTDOT, L_DOTDOTDOT, L_DSLASH, L_QUESTION, L_STAR,
+	    L_UNDERSCORE, K_COMMENT, K_ID, K_KEY, K_NODE, K_TEXT,
+	    T_VAR, M_SEQUENCE, C_INDEX, C_TEST, C_UNION,
+	    0
+	};
+
+	rc = xo_xpath_feature_warn_since(NULL, xdp, start,
+					 unsupported_tokens, "");
+    }
 
     return rc ? -1 : 0;
 }
@@ -351,8 +369,8 @@ xo_filter_all_dead (xo_handle_t *xop UNUSED, xo_filter_t *xfp UNUSED)
     return rc; /* Either zero active matches or no DEADENDS */
 }
 
-xo_filter_status_t
-xo_filter_get_status (xo_handle_t *xop UNUSED, xo_filter_t *xfp)
+static xo_filter_status_t
+xo_filter_op_get_status (xo_handle_t *xop UNUSED, xo_filter_t *xfp)
 {
     return xfp->xf_status;
 }
@@ -360,8 +378,8 @@ xo_filter_get_status (xo_handle_t *xop UNUSED, xo_filter_t *xfp)
 /*
  * Turn a xo_filter_status_t into a string for debug output
  */
-const char *
-xo_filter_status_name (xo_filter_status_t rc)
+static const char *
+xo_filter_op_status_name (xo_filter_status_t rc)
 {
     return (rc == 0) ? "zero" :
 	(rc == XO_STATUS_TRACK) ? "track" :
@@ -427,7 +445,7 @@ xo_filter_change_status (xo_handle_t *xop, xo_filter_t *xfp,
     return rc;
 }
 
-xo_filter_status_t
+static xo_filter_status_t
 xo_filter_update_status (xo_handle_t *xop, xo_filter_t *xfp)
 {
     return xo_filter_change_status(xop, xfp, "caller");
@@ -734,21 +752,21 @@ xo_filter_open (xo_handle_t *xop, xo_filter_t *xfp,
     return xfp->xf_status;
 }
 
-int
-xo_filter_open_container (xo_handle_t *xop, xo_filter_t *xfp,
+static int
+xo_filter_op_open_container (xo_handle_t *xop, xo_filter_t *xfp,
 			  const char *tag)
 {
     return xo_filter_open(xop, xfp, tag, strlen(tag), "container");
 }
 
-int
-xo_filter_open_instance (xo_handle_t *xop, xo_filter_t *xfp, const char *tag)
+static int
+xo_filter_op_open_instance (xo_handle_t *xop, xo_filter_t *xfp, const char *tag)
 {
     return xo_filter_open(xop, xfp, tag, strlen(tag), "list");
 }
 
-int
-xo_filter_open_field (xo_handle_t *xop, xo_filter_t *xfp,
+static int
+xo_filter_op_open_field (xo_handle_t *xop, xo_filter_t *xfp,
 		      const char *tag, ssize_t  tlen)
 {
     return xo_filter_open(xop, xfp, tag, tlen, "field");
@@ -895,22 +913,22 @@ xo_filter_close (xo_handle_t *xop, xo_filter_t *xfp,
     return xfp->xf_status;
 }
 
-int
-xo_filter_close_field (xo_handle_t *xop, xo_filter_t *xfp,
+static int
+xo_filter_op_close_field (xo_handle_t *xop, xo_filter_t *xfp,
 		      const char *tag, ssize_t  tlen)
 {
     return xo_filter_close(xop, xfp, tag, tlen, "field");
 }
 
-int
-xo_filter_close_instance (xo_handle_t *xop UNUSED, xo_filter_t *xfp,
+static int
+xo_filter_op_close_instance (xo_handle_t *xop UNUSED, xo_filter_t *xfp,
 			  const char *tag)
 {
     return xo_filter_close(xop, xfp, tag, strlen(tag), "instance");
 }
 
-int
-xo_filter_close_container (xo_handle_t *xop UNUSED, xo_filter_t *xfp,
+static int
+xo_filter_op_close_container (xo_handle_t *xop UNUSED, xo_filter_t *xfp,
 			   const char *tag)
 {
     return xo_filter_close(xop, xfp, tag, strlen(tag), "container");
@@ -1336,6 +1354,18 @@ xo_eval_compare (XO_EVAL_OP_ARGS)
 	rc = (left.xev_float > fval) ? 1 : (left.xev_float < fval) ? -1 : 0;
 	break;
 
+    case TYPE_CMP(C_INT64, C_FLOAT):
+    case TYPE_CMP(C_UINT64, C_FLOAT):
+	fval = xo_eval_cast_float(xfp, left);
+	rc = (fval > right.xev_float) ? 1 : (fval < right.xev_float) ? -1 : 0;
+	break;
+
+    case TYPE_CMP(C_FLOAT, C_INT64):
+    case TYPE_CMP(C_FLOAT, C_UINT64):
+	fval = xo_eval_cast_float(xfp, right);
+	rc = (left.xev_float > fval) ? 1 : (left.xev_float < fval) ? -1 : 0;
+	break;
+
     case TYPE_CMP(C_BOOLEAN, C_BOOLEAN):
     case TYPE_CMP(C_INT64, C_BOOLEAN):
     case TYPE_CMP(C_BOOLEAN, C_INT64):
@@ -1748,8 +1778,8 @@ xo_filter_pred_needs (xo_xparse_data_t *xdp, xo_filter_t *xfp,
     return FALSE;
 }
 
-int
-xo_filter_key (xo_handle_t *xop, xo_filter_t *xfp,
+static int
+xo_filter_op_key (xo_handle_t *xop, xo_filter_t *xfp,
 	       const char *tag, xo_ssize_t tlen,
 	       const char *value, xo_ssize_t vlen)
 {
@@ -1876,7 +1906,7 @@ xo_filter_dump_matches (xo_handle_t *xop, xo_filter_t *xfp)
 	return;
 
     xo_dbg(xop, "xo_filter_dump_matches: [depth %d] status: %s/%d",
-	   xfp->xf_depth, xo_filter_status_name(xfp->xf_status),
+	   xfp->xf_depth, xo_filter_op_status_name(xfp->xf_status),
 	   xfp->xf_status);
 
     /*
@@ -1912,8 +1942,8 @@ xo_filter_dump_matches (xo_handle_t *xop, xo_filter_t *xfp)
 /*
  * We use the whiteboard to stash content that can be reused.
  */
-int
-xo_filter_whiteboard (XO_ENCODER_HANDLER_ARGS,
+static int
+xo_filter_op_whiteboard (XO_ENCODER_HANDLER_ARGS,
 		      xo_encoder_func_t func XO_UNUSED,
  		      struct xo_filter_s *xfp)
 {
@@ -1955,7 +1985,8 @@ xo_filter_whiteboard (XO_ENCODER_HANDLER_ARGS,
 	    /*
 	     * Let the predicate logic know we've got a key.
 	     */
-	    xo_filter_key(xop, xfp, name, strlen(name), value, strlen(value));
+	    xo_filter_op_key(xop, xfp, name, strlen(name),
+			     value, strlen(value));
 
 	} else {
 	    if (xfp->xf_status == XO_STATUS_TRACK)
@@ -1974,4 +2005,30 @@ xo_filter_whiteboard (XO_ENCODER_HANDLER_ARGS,
 	   xo_filter_status_name(xfp->xf_status), xfp->xf_status);
 
     return rc;
+}
+
+static xo_filter_ops_t xo_filter_ops_local = {
+    XO_FILTER_OPS_VERSION,
+    XO_FILTER_OPS_FUNCS
+};
+
+int				/* Found via dlsym() */
+xo_filter_init (int version, xo_filter_ops_t *ops);
+
+int
+xo_filter_init (int version, xo_filter_ops_t *ops)
+{
+    if (version && version < XO_FILTER_OPS_VERSION)
+	return -1;
+
+    memcpy(ops, &xo_filter_ops_local, sizeof(*ops));
+
+    return XO_FILTER_OPS_VERSION;
+}
+
+void
+xo_filter_setup_test (void)
+{
+    xo_setup_filter_lib_test(XO_FILTER_OPS_VERSION, &xo_filter_ops_local);
+
 }

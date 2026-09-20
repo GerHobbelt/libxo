@@ -198,15 +198,15 @@ xo_xparse_ttname_map_t xo_xparse_ttname_map[] = {
     { T_VAR,			"variable name" },
     { C_ABSOLUTE,		"absolute path" },
     { C_ATTRIBUTE,		"attribute axis" },
-    { C_DESCENDANT,		"descendant child ('one//two')" },
+    { C_DESCENDANT,		"descendant child (e.g. 'one//two')" },
     { C_ELEMENT,		"path element" },
     { C_EXPR,			"parenthetical expresions" },
-    { C_INDEX,			"index value ('foo[4]')" },
+    { C_INDEX,			"index value (e.g. 'foo[4]')" },
     { C_NOT,			"negation ('!tag')" },
     { C_PATH,			"path of element" },
     { C_PREDICATE,		"predicate ('[test]')" },
     { C_TEST,			"node test ('node()')" },
-    { C_UNION,			"union of two paths ('one|two')" },
+    { C_UNION,			"union of two paths (e.g. 'one|two')" },
     { C_INT64,			"signed 64-bit integer" },
     { C_UINT64,			"unsigned 64-bit integer" },
     { C_FLOAT,			"floating point number (double)" },
@@ -241,7 +241,7 @@ xo_xparse_setup_lexer (void)
 
     for (i = 0; xo_xparse_ttname_map[i].st_ttype; i++) {
 	ttype = xo_xparse_token_translate(xo_xparse_ttname_map[i].st_ttype);
-	xo_xparse_token_name_fancy[ttype] =  xo_xparse_ttname_map[i].st_name;
+	xo_xparse_token_name_fancy[ttype] = xo_xparse_ttname_map[i].st_name;
     }
 }
 
@@ -589,16 +589,20 @@ xo_xparse_dump (xo_xparse_data_t *xdp)
 
 static int
 xo_xparse_feature_warn_one_node (const char *tag, xo_xparse_data_t *xdp UNUSED,
-				 const int *map, int len,
+				 int *map, int len,
 				 xo_xparse_node_id_t id UNUSED,
 				 xo_xparse_node_t *xnp)
 {
     xo_xparse_token_t type = xnp->xn_type;
 
     if ((int) type < len && map[type]) {
+	const char *tname = xo_xparse_fancy_token_name(type);
+	if (tname == NULL)
+	     tname = "(unknown)";
+
 	xo_xparse_warn(xdp, "%s%sxpath feature is unsupported: %s",
-		       tag ?: "", tag ? ": " : "",
-		       xo_xparse_fancy_token_name(type));
+		       tag ?: "", tag ? ": " : "", tname);
+	map[type] = 0;		/* Turn off, now that the user knows */
 	return 1;
     }
 
@@ -607,7 +611,7 @@ xo_xparse_feature_warn_one_node (const char *tag, xo_xparse_data_t *xdp UNUSED,
 
 static int
 xo_xparse_feature_warn_node (const char *tag, xo_xparse_data_t *xdp,
-			     const int *map, int len,
+			     int *map, int len,
 			     xo_xparse_node_id_t id)
 {
     int hit = 0;
@@ -625,8 +629,9 @@ xo_xparse_feature_warn_node (const char *tag, xo_xparse_data_t *xdp,
 }
 
 int
-xo_xpath_feature_warn (const char *tag, xo_xparse_data_t *xdp,
-		       const int *tokens, const char *bytes)
+xo_xpath_feature_warn_since (const char *tag, xo_xparse_data_t *xdp,
+			     uint32_t start,
+			     const int *tokens, const char *bytes)
 {
     if (xdp->xd_paths_cur == 0)	/* Parsing errors */
 	return 0;
@@ -656,11 +661,18 @@ xo_xpath_feature_warn (const char *tag, xo_xparse_data_t *xdp,
     xo_xparse_node_id_t *pp = xdp->xd_paths;
     int rc = 0;
 
-    for (i = 0; i < xdp->xd_paths_cur; i++, pp++) {
+    for (i = start, pp += start; i < xdp->xd_paths_cur; i++, pp++) {
 	rc += xo_xparse_feature_warn_node(tag, xdp, map, len, *pp);
     }
 
     return rc;
+}
+
+int
+xo_xpath_feature_warn (const char *tag, xo_xparse_data_t *xdp,
+		       const int *tokens, const char *bytes)
+{
+    return xo_xpath_feature_warn_since(tag, xdp, 0, tokens, bytes);
 }
 
 int

@@ -293,6 +293,11 @@ const char *
 xo_xparse_fancy_token_name (xo_xparse_token_t id);
 
 int
+xo_xpath_feature_warn_since (const char *tag, xo_xparse_data_t *xdp,
+			     uint32_t start,
+			     const int *tokens, const char *bytes);
+
+int
 xo_xpath_feature_warn (const char *tag, xo_xparse_data_t *xdp,
 		       const int *tokens, const char *bytes);
 
