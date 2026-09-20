@@ -30,6 +30,7 @@ static int opt_case;
 static int opt_skip;
 static int opt_quiet;
 static const char *opt_filter;
+int this_case = 1;
 
 static char *
 trim (char *cp)
@@ -108,13 +109,16 @@ do_add_filter (xo_handle_t *xop, xo_xparse_data_t *xdp, const char *filter)
 }
 
 static void
-do_work (xo_handle_t *xop, xo_filter_t *xfp, xo_xparse_data_t *xdp, FILE *in)
+do_work (xo_handle_t *xop, xo_filter_t *xfp, xo_xparse_data_t *xdp,
+	 const char *filename, FILE *in)
 {
     char *cp, buf[BUFSIZ];
+    char incfile[MAXPATHLEN];
+    const char *lastslash = filename ? rindex(filename, '/') : NULL;
     char *field, *value;
     int rc;
     int done = FALSE;
-    int this_case = 1;
+    const char *rolmod = "";
 
     for (rc = 0; !done; rc = 0) {
 	cp = fgets(buf, sizeof(buf), in);
@@ -176,14 +180,24 @@ do_work (xo_handle_t *xop, xo_filter_t *xfp, xo_xparse_data_t *xdp, FILE *in)
 
 	case '[':
 	    field = trim(cp + 1);
-	    value = clean_token(field);
-	    if (!*field || !*value)
+	    if (!*field)
 		break;
 
 	    if (!opt_quiet)
-		fprintf(stderr, "main: field: '%s'='%s'\n", field, value);
+		fprintf(stderr, "main: open leaf list: '%s'\n", field);
 
-	    rc = xo_emit_field_h(xop, "", field, "%s", NULL, value);
+	    rolmod = "l";
+	    break;
+
+	case ']':
+	    field = trim(cp + 1);
+	    if (!*field)
+		break;
+
+	    if (!opt_quiet)
+		fprintf(stderr, "main: close leaf list: '%s'\n", field);
+
+	    rolmod = "";
 	    break;
 
 	case '=':		/* Non-key field */
@@ -195,7 +209,7 @@ do_work (xo_handle_t *xop, xo_filter_t *xfp, xo_xparse_data_t *xdp, FILE *in)
 	    if (!opt_quiet)
 		fprintf(stderr, "main: field: '%s'='%s'\n", field, value);
 
-	    rc = xo_emit_field_h(xop, "", field, "%s", NULL, value);
+	    rc = xo_emit_field_h(xop, rolmod, field, "%s", NULL, value);
 	    break;
 
 	case '$':
@@ -223,15 +237,22 @@ do_work (xo_handle_t *xop, xo_filter_t *xfp, xo_xparse_data_t *xdp, FILE *in)
 	    break;
 
 	case 'i':		/* Include */
-	    field = trim(cp + 1);
-	    value = clean_token(field);
+	    value = trim(cp + 1);
 
 	    if (value == NULL) {
 		fprintf(stderr, "main: include: missing filename\n");
 		continue;
 	    }
 
-	    fprintf(stderr, "main: include: '%s'\n", value);
+	    /* If the path isn't absolute, base it on the previous path */
+	    if (*value != '/' && lastslash) {
+		snprintf(incfile, sizeof(incfile), "%.*s/%s",
+			 (int)(lastslash - filename), filename, value);
+		value = incfile;
+	    }
+
+	    if (!opt_quiet)
+		fprintf(stderr, "main: include: '%s'\n", value);
 	    FILE *newp = fopen(value, "r");
 	    if (newp == NULL) {
 		fprintf(stderr, "main: include: could not open file '%s'\n",
@@ -239,7 +260,7 @@ do_work (xo_handle_t *xop, xo_filter_t *xfp, xo_xparse_data_t *xdp, FILE *in)
 		continue;
 	    }
 
-	    do_work(xop, xfp, xdp, newp);
+	    do_work(xop, xfp, xdp, incfile, newp);
 
 	    fclose(newp);
 	    break;
@@ -344,7 +365,7 @@ main (int argc, char **argv)
 	if (do_add_filter(xop, xdp, opt_filter))
 	    return 1;
 
-    do_work(xop, xfp, xdp, in);
+    do_work(xop, xfp, xdp, opt_input, in);
 
     xo_finish_h(xop);
 

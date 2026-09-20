@@ -5231,6 +5231,92 @@ xo_filt_commit (xo_handle_t *xop UNUSED, xo_stack_t *cur UNUSED,
 	   fstatus, xo_filt_status_name(fstatus), xop->xo_depth);
     xo_filt_dump(xop, "commit before");
 
+    /*
+     * If the current frame still holds tentative content (xs_rb_off set),
+     * ancestor TRACK frames will have buffered non-tag content (e.g. sibling
+     * fields before the matching path) that must be discarded.  Compact the
+     * ancestors like xo_filt_commit_compact does, then move the current
+     * frame's entire buffered range (opening tag plus any fields written so
+     * far) to follow the compacted ancestors.  This handles the case where a
+     * predicate field or key field resolves a PRED instance to FULL while
+     * ancestor TRACK containers have accumulated junk in the buffer.
+     */
+    if (cur && cur->xs_rb_off != XS_OFFSET_CLEAR) {
+	xo_buffer_t *xbp = &xop->xo_data;
+	xo_off_t item_start = cur->xs_rb_off;
+	xo_off_t item_end = xo_buf_offset(xbp);
+	ssize_t item_len = (item_end > item_start) ? (item_end - item_start) : 0;
+
+	xop->xo_stack[0].xs_fstatus = fstatus;
+	xo_off_t write_off = XS_OFFSET_CLEAR;
+	xo_off_t prev_keep_end = XS_OFFSET_CLEAR;
+	int prev_had_key = FALSE;
+
+	for (xo_stack_t *xsp = xop->xo_stack + 1; xsp < cur; xsp++) {
+	    xo_off_t key_off = xsp->xs_key_off;
+	    xsp->xs_fstatus = fstatus;
+	    xsp->xs_key_off = XS_OFFSET_CLEAR;
+
+	    if (xsp->xs_rb_off == XS_OFFSET_CLEAR) {
+		prev_keep_end = XS_OFFSET_CLEAR;
+		prev_had_key = FALSE;
+		continue;
+	    }
+
+	    xo_off_t tag_start = xsp->xs_rb_off;
+	    xo_off_t keep_end = (xsp->xs_tag_end != XS_OFFSET_CLEAR)
+		? xsp->xs_tag_end : tag_start;
+	    if (key_off != XS_OFFSET_CLEAR && key_off > keep_end)
+		keep_end = key_off;
+
+	    ssize_t keep_len = (keep_end > tag_start) ? (keep_end - tag_start) : 0;
+
+	    xo_off_t actual_tag_start = tag_start;
+	    if (xo_style(xop) == XO_STYLE_JSON
+		    && (xsp->xs_rb_flags & XSF_NOT_FIRST)
+		    && prev_keep_end != XS_OFFSET_CLEAR
+		    && tag_start > prev_keep_end
+		    && !prev_had_key) {
+		actual_tag_start += 2;
+		keep_len = (keep_len > 2) ? keep_len - 2 : 0;
+	    }
+	    prev_keep_end = keep_end;
+	    prev_had_key = (key_off != XS_OFFSET_CLEAR);
+
+	    if (write_off == XS_OFFSET_CLEAR)
+		write_off = actual_tag_start;
+	    if (keep_len > 0) {
+		if (actual_tag_start != write_off)
+		    memmove(xbp->xb_bufp + write_off, xbp->xb_bufp + actual_tag_start,
+			    keep_len);
+		write_off += keep_len;
+	    }
+	    xsp->xs_rb_off = XS_OFFSET_CLEAR;
+	    xsp->xs_tag_end = XS_OFFSET_CLEAR;
+	}
+
+	/* Commit cur, preserving its entire buffered content */
+	cur->xs_fstatus = fstatus;
+	cur->xs_rb_off = XS_OFFSET_CLEAR;
+	cur->xs_tag_end = XS_OFFSET_CLEAR;
+	cur->xs_key_off = XS_OFFSET_CLEAR;
+
+	if (item_len > 0) {
+	    if (write_off == XS_OFFSET_CLEAR)
+		write_off = item_start;
+	    if (item_start != write_off)
+		memmove(xbp->xb_bufp + write_off, xbp->xb_bufp + item_start,
+			item_len);
+	    write_off += item_len;
+	}
+	if (write_off != XS_OFFSET_CLEAR)
+	    xo_buf_set_offset(xbp, write_off);
+
+	xo_filt_dump(xop, "commit after");
+	XOIF_CLEAR(xop, XOIF_FILTERING);
+	return;
+    }
+
     for (xo_stack_t *xsp = xop->xo_stack; xsp <= cur; xsp++) {
 	XO_DBG(xop, "xo_filt_commit: clearing offset %d, "
 	       "status %u=%s -> %u=%s",
@@ -5245,6 +5331,119 @@ xo_filt_commit (xo_handle_t *xop UNUSED, xo_stack_t *cur UNUSED,
 
     xo_filt_dump(xop, "commit after");
 
+    XOIF_CLEAR(xop, XOIF_FILTERING);
+#endif /* LIBXO_NEED_FILTERS */
+}
+
+/*
+ * Commit a matching leaf field (e.g. a "cost[. > 55]" predicate that
+ * resolves on the field itself).  Unlike xo_filt_commit, the matched unit
+ * is a single leaf, not a pushed frame, so the enclosing container (cur) is
+ * itself an ancestor whose buffered sibling fields must be discarded.  We
+ * compact every open frame (including cur) down to its opening tag plus any
+ * keys, then move the matched leaf [field_start..end] to follow.  Ancestor
+ * tags become permanent (context), while trailing non-matching siblings are
+ * left to the normal per-field skip/rollback path.
+ */
+static void
+xo_filt_commit_field (xo_handle_t *xop UNUSED, xo_off_t field_start UNUSED,
+		      xo_filter_status_t fstatus UNUSED)
+{
+#ifdef LIBXO_NEED_FILTERS
+    if (!XOF_ISSET(xop, XOF_FILTER))
+	return;
+
+    xo_stack_t *cur = xo_stack_cur(xop);
+    xo_buffer_t *xbp = &xop->xo_data;
+
+    XO_DBG(xop, "xo_filt_commit_field: status -> %u=%s (depth %u, start %d)",
+	   fstatus, xo_filt_status_name(fstatus), xop->xo_depth,
+	   (int) field_start);
+    xo_filt_dump(xop, "commit-field before");
+
+    xo_off_t item_start = field_start;
+    xo_off_t item_end = xo_buf_offset(xbp);
+    ssize_t item_len = (item_end > item_start) ? (item_end - item_start) : 0;
+
+    xop->xo_stack[0].xs_fstatus = fstatus;
+
+    xo_off_t write_off = XS_OFFSET_CLEAR;
+    xo_off_t prev_keep_end = XS_OFFSET_CLEAR;
+    int prev_had_key = FALSE;
+    int last_clear = TRUE;	/* was the parent (cur) already committed? */
+
+    /* Compact every open frame, cur included, to tag + keys */
+    for (xo_stack_t *xsp = xop->xo_stack + 1; xsp <= cur; xsp++) {
+	xo_off_t key_off = xsp->xs_key_off;
+	xsp->xs_fstatus = fstatus;
+	xsp->xs_key_off = XS_OFFSET_CLEAR;
+
+	if (xsp->xs_rb_off == XS_OFFSET_CLEAR) {
+	    prev_keep_end = XS_OFFSET_CLEAR;
+	    prev_had_key = FALSE;
+	    last_clear = TRUE;
+	    continue;
+	}
+	last_clear = FALSE;
+
+	xo_off_t tag_start = xsp->xs_rb_off;
+	xo_off_t keep_end = (xsp->xs_tag_end != XS_OFFSET_CLEAR)
+	    ? xsp->xs_tag_end : tag_start;
+	if (key_off != XS_OFFSET_CLEAR && key_off > keep_end)
+	    keep_end = key_off;
+
+	ssize_t keep_len = (keep_end > tag_start) ? (keep_end - tag_start) : 0;
+
+	xo_off_t actual_tag_start = tag_start;
+	if (xo_style(xop) == XO_STYLE_JSON
+		&& (xsp->xs_rb_flags & XSF_NOT_FIRST)
+		&& prev_keep_end != XS_OFFSET_CLEAR
+		&& tag_start > prev_keep_end
+		&& !prev_had_key) {
+	    actual_tag_start += 2;
+	    keep_len = (keep_len > 2) ? keep_len - 2 : 0;
+	}
+	prev_keep_end = keep_end;
+	prev_had_key = (key_off != XS_OFFSET_CLEAR);
+
+	if (write_off == XS_OFFSET_CLEAR)
+	    write_off = actual_tag_start;
+	if (keep_len > 0) {
+	    if (actual_tag_start != write_off)
+		memmove(xbp->xb_bufp + write_off, xbp->xb_bufp + actual_tag_start,
+			keep_len);
+	    write_off += keep_len;
+	}
+	xsp->xs_rb_off = XS_OFFSET_CLEAR;
+	xsp->xs_tag_end = XS_OFFSET_CLEAR;
+    }
+
+    /*
+     * In JSON the matched leaf carries a leading 2-byte separator (", " or
+     * ",\n") since siblings preceded it.  Now that those siblings are gone and
+     * the leaf becomes the first member after the parent's freshly-kept '{',
+     * strip that separator (mirrors the ancestor-tag handling above).  Only do
+     * this when the parent was compacted here (not already committed) and kept
+     * no key ahead of the leaf.
+     */
+    if (xo_style(xop) == XO_STYLE_JSON && !last_clear && !prev_had_key
+	    && item_len >= 2 && xbp->xb_bufp[item_start] == ',') {
+	item_start += 2;
+	item_len -= 2;
+    }
+
+    /* Move the matched leaf to follow the compacted ancestor tags */
+    if (item_len > 0) {
+	if (write_off == XS_OFFSET_CLEAR)
+	    write_off = item_start;
+	if (item_start != write_off)
+	    memmove(xbp->xb_bufp + write_off, xbp->xb_bufp + item_start, item_len);
+	write_off += item_len;
+    }
+    if (write_off != XS_OFFSET_CLEAR)
+	xo_buf_set_offset(xbp, write_off);
+
+    xo_filt_dump(xop, "commit-field after");
     XOIF_CLEAR(xop, XOIF_FILTERING);
 #endif /* LIBXO_NEED_FILTERS */
 }
@@ -5294,6 +5493,9 @@ xo_filt_commit_compact (xo_handle_t *xop UNUSED, xo_stack_t *cur UNUSED,
 
     xo_buffer_t *xbp = &xop->xo_data;
     xo_off_t write_off = XS_OFFSET_CLEAR;
+    xo_off_t prev_keep_end = XS_OFFSET_CLEAR;
+    int prev_had_key = FALSE;
+    int cur_was_pending = (cur->xs_rb_off != XS_OFFSET_CLEAR);
 
     for (xo_stack_t *xsp = xop->xo_stack + 1; xsp <= cur; xsp++) {
 	XO_DBG(xop, "xo_filt_commit_compact: frame %u rb_off %d "
@@ -5307,6 +5509,8 @@ xo_filt_commit_compact (xo_handle_t *xop UNUSED, xo_stack_t *cur UNUSED,
 	xsp->xs_key_off = XS_OFFSET_CLEAR;
 
 	if (xsp->xs_rb_off == XS_OFFSET_CLEAR) {
+	    prev_keep_end = XS_OFFSET_CLEAR; /* parent already committed; unknown end */
+	    prev_had_key = FALSE;
 	    continue;
 	}
 
@@ -5323,12 +5527,35 @@ xo_filt_commit_compact (xo_handle_t *xop UNUSED, xo_stack_t *cur UNUSED,
 
 	ssize_t keep_len = (keep_end > tag_start) ? (keep_end - tag_start) : 0;
 
+	/*
+	 * If this frame's opening bytes begin with a JSON comma prefix
+	 * (",\n" or ", "), that prefix was written because the parent
+	 * already had at least one child (xs_rb_flags & XSF_NOT_FIRST).
+	 * Strip the comma only when ALL of those prior children fall in the
+	 * gap being discarded (prev_keep_end..tag_start) AND the parent
+	 * kept no key fields — kept key fields legitimately set NOT_FIRST
+	 * and the comma must remain.
+	 * Both compact (", ") and pretty (",\n") forms are 2 bytes.
+	 */
+	xo_off_t actual_tag_start = tag_start;
+	if (xo_style(xop) == XO_STYLE_JSON
+	        && (xsp->xs_rb_flags & XSF_NOT_FIRST)
+	        && prev_keep_end != XS_OFFSET_CLEAR
+	        && tag_start > prev_keep_end
+	        && !prev_had_key) {
+	    actual_tag_start += 2;
+	    keep_len = (keep_len > 2) ? keep_len - 2 : 0;
+	}
+
+	prev_keep_end = keep_end;
+	prev_had_key = (key_off != XS_OFFSET_CLEAR);
+
 	if (write_off == XS_OFFSET_CLEAR)
-	    write_off = tag_start;
+	    write_off = actual_tag_start;
 
 	if (keep_len > 0) {
-	    if (tag_start != write_off)
-		memmove(xbp->xb_bufp + write_off, xbp->xb_bufp + tag_start,
+	    if (actual_tag_start != write_off)
+		memmove(xbp->xb_bufp + write_off, xbp->xb_bufp + actual_tag_start,
 			keep_len);
 	    write_off += keep_len;
 	}
@@ -5339,6 +5566,17 @@ xo_filt_commit_compact (xo_handle_t *xop UNUSED, xo_stack_t *cur UNUSED,
 
     if (write_off != XS_OFFSET_CLEAR)
 	xo_buf_set_offset(xbp, write_off);
+
+    /*
+     * Reset NOT_FIRST/CONTENT on cur so the first real child (the
+     * newly-FULL container about to open) does not inherit a stale JSON
+     * comma.  Only do this when cur itself had pending (un-committed)
+     * content: if cur's xs_rb_off was already CLEAR it was committed with
+     * genuine content and NOT_FIRST must be preserved.
+     * Also skip when cur kept key fields — those legitimately set NOT_FIRST.
+     */
+    if (cur_was_pending && !prev_had_key)
+	cur->xs_flags &= ~XSF_RB_BITS;
 
     XOIF_CLEAR(xop, XOIF_FILTERING);
 #endif /* LIBXO_NEED_FILTERS */
@@ -5487,9 +5725,14 @@ xo_filt_is_skippable (xo_handle_t *xop, xo_xff_flags_t flags,
     /*
      * If we're inside a capture for a PRED instance, buffer all
      * sibling/nested content tentatively (XML/JSON only — encoder
-     * state cannot be rolled back).
+     * state cannot be rolled back).  Only applies when the current
+     * frame has an active whiteboard (xs_rb_off set); after compact
+     * commit clears xs_rb_off, XOIF_FILTERING may still be set by
+     * rollback of a sibling container, but fields at that level are
+     * individually skippable and must not be suppressed here.
      */
-    if (XOIF_ISSET(xop, XOIF_FILTERING) && xo_style(xop) != XO_STYLE_ENCODER)
+    if (XOIF_ISSET(xop, XOIF_FILTERING) && xo_style(xop) != XO_STYLE_ENCODER
+	    && xo_stack_cur(xop)->xs_rb_off != XS_OFFSET_CLEAR)
 	return FALSE;
 
     if (fstatus == XO_STATUS_PRED)
@@ -5525,7 +5768,7 @@ xo_filt_skip (xo_handle_t *xop, xo_xff_flags_t flags,
 
 static xo_filter_status_t 
 xo_filt_do_open_field (xo_handle_t *xop, const char *name, xo_ssize_t nlen,
-		       const char *value, xo_ssize_t vlen,
+		       const char *value, xo_ssize_t vlen, xo_off_t field_start,
 		       int pass_field, xo_xff_flags_t flags)
 {
     xo_filter_t *xfp = xo_filters(xop);
@@ -5555,9 +5798,20 @@ xo_filt_do_open_field (xo_handle_t *xop, const char *name, xo_ssize_t nlen,
 	xo_filt_handle_open_status(xop, fstatus);
     }
 
-    fstatus = xo_filter_open_field(xop, xfp, name, nlen);
-    if (fstatus == XO_STATUS_FULL)
-	xo_filt_commit(xop, xo_stack_cur(xop), fstatus);
+    fstatus = xo_filter_open_field(xop, xfp, name, nlen, value, vlen);
+    if (fstatus == XO_STATUS_FULL) {
+	/*
+	 * A non-key field that matches on its own (e.g. a "cost[. > 55]"
+	 * predicate resolving on the field itself) is a leaf match: the
+	 * enclosing container is an ancestor whose buffered siblings must be
+	 * dropped, so use the leaf-aware commit.  Key fields and styles that
+	 * can't roll back (encoder) fall back to the frame-oriented commit.
+	 */
+	if (!(flags & XFF_KEY) && field_start != XS_OFFSET_CLEAR)
+	    xo_filt_commit_field(xop, field_start, fstatus);
+	else
+	    xo_filt_commit(xop, xo_stack_cur(xop), fstatus);
+    }
 
     return fstatus;
 }
@@ -5645,8 +5899,9 @@ xo_format_value_encoder (xo_handle_t *xop, const char *name, ssize_t nlen,
 
     /* Always call open and close, since they may change the status */
     if (XOF_ISSET(xop, XOF_FILTER))
-	xo_filt_do_open_field(xop, name, nlen, data, dlen, FALSE, flags);
-    
+	xo_filt_do_open_field(xop, name, nlen, data, dlen, XS_OFFSET_CLEAR,
+			      FALSE, flags);
+
 
     if (!(XOF_ISSET(xop, XOF_FILTER) && xo_filt_skip(xop, flags, name, nlen))) {
 	xo_encoder_handle(xop, quote ? XO_OP_STRING : XO_OP_CONTENT, NULL,
@@ -5877,7 +6132,7 @@ xo_format_value_xml (xo_handle_t *xop, const char *name, ssize_t nlen,
     xo_filter_status_t fstatus UNUSED;
     if (XOF_ISSET(xop, XOF_FILTER)) {
 	fstatus = xo_filt_do_open_field(xop, name, nlen, data, dlen,
-					TRUE, flags);
+					start_offset, TRUE, flags);
     }
 
     /*
@@ -6064,7 +6319,7 @@ xo_format_value (xo_handle_t *xop, const char *name, ssize_t nlen,
 
 	    xo_filt_do_open_field(xop, name, nlen,
 				  xo_buf_data(&xop->xo_data, val_off), val_len,
-				  TRUE, flags);
+				  json_start, TRUE, flags);
 	    if (xo_filt_skip(xop, flags, name, nlen)) {
 		xo_buf_set_offset(&xop->xo_data, json_start);
 		xop->xo_stack[xop->xo_depth].xs_flags =
@@ -8146,6 +8401,21 @@ xo_do_open_container (xo_handle_t *xop, xo_xof_flags_t flags, const char *name)
 	    starting_offset = XS_OFFSET_CLEAR;
     }
 
+    /*
+     * After compact-commit clears XOIF_FILTERING, a new TRACK container
+     * that opens as a sibling of the committed region still needs
+     * XOIF_FILTERING set so that the buffer is not flushed to the fd
+     * before the rollback on close (which would make the opening tag
+     * permanent while the closing tag is suppressed).  Mirror the same
+     * guard used in xo_do_open_instance().
+     */
+    if (XOF_ISSET(xop, XOF_FILTER)) {
+	if (fstatus == XO_STATUS_PRED)
+	    XOIF_SET(xop, XOIF_FILTERING);
+	else if (fstatus == XO_STATUS_TRACK && old_fstatus == XO_STATUS_FULL)
+	    XOIF_SET(xop, XOIF_FILTERING);
+    }
+
     xo_depth_change(xop, name, 1, 1, XSS_OPEN_CONTAINER,
 		    xo_stack_flags(flags), fstatus, starting_offset);
 
@@ -8353,6 +8623,21 @@ xo_do_open_list (xo_handle_t *xop, xo_xof_flags_t flags, const char *name)
     case XO_STYLE_ENCODER:
 	rc = xo_encoder_handle(xop, XO_OP_OPEN_LIST, NULL, name, NULL, flags);
 	break;
+    }
+
+    /*
+     * When the parent frame is committed (FULL), its xs_rb_off is CLEAR but
+     * the list frame we are about to push will carry a live starting_offset.
+     * If a tty or high-water flush fires before the first FULL item triggers
+     * commit_compact, that offset becomes meaningless — commit_compact would
+     * use it to set xb_curp to a position that no longer corresponds to the
+     * ancestor content in the buffer, corrupting output.  Keep
+     * XOIF_FILTERING set so xo_avoid_flushing() suppresses any such flush
+     * until commit_compact fires and clears both xs_rb_off and XOIF_FILTERING.
+     */
+    if (XOF_ISSET(xop, XOF_FILTER)) {
+	if (xo_stack_cur(xop)->xs_fstatus == XO_STATUS_FULL)
+	    XOIF_SET(xop, XOIF_FILTERING);
     }
 
     xo_depth_change(xop, name, 1, indent, XSS_OPEN_LIST,
@@ -8572,6 +8857,19 @@ xo_do_close_leaf_list (xo_handle_t *xop, const char *name)
 
 	xo_depth_change(xop, name, -1, -1, XSS_CLOSE_LEAF_LIST, XSF_LIST, 0, 0);
 	rc = xo_printf(xop, "%s%*s]", pre_nl, xo_indent(xop), "");
+	xop->xo_stack[xop->xo_depth].xs_flags |= XSF_NOT_FIRST;
+	break;
+
+    case XO_STYLE_XML:
+	/*
+	 * A leaf-list emits no wrapping tag, but its members may have been
+	 * buffered tentatively while filtering (xs_rb_off set).  Roll them
+	 * back on close if the list never matched, just as the JSON path
+	 * (and xo_do_close_container/instance) do.
+	 */
+	if (XOF_ISSET(xop, XOF_FILTER) && xsp->xs_rb_off != XS_OFFSET_CLEAR)
+	    xo_filt_rollback(xop, xsp, xsp->xs_fstatus, xsp->xs_fstatus);
+	xo_depth_change(xop, name, -1, 0, XSS_CLOSE_LEAF_LIST, XSF_LIST, 0, 0);
 	xop->xo_stack[xop->xo_depth].xs_flags |= XSF_NOT_FIRST;
 	break;
 
