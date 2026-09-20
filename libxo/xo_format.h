@@ -263,6 +263,17 @@ xo_xff_flags_t xo_name_lookup(xo_flag_mapping_t *map, const char *value,
 			       ssize_t len);
 
 /*
+ * Look up the name of a role
+ */
+const char *xo_lookup_role_name(uint32_t value);
+
+/*
+ * Table mapping field role characters (e.g. 'C', 'L', 'N') to their
+ * human-readable names, for use in diagnostics.
+ */
+extern xo_flag_mapping_t xo_role_names[];
+
+/*
  * Return the pessimistic maximum number of field slots needed for fmt.
  * Used internally and by callers that supply their own field buffer.
  */
@@ -302,8 +313,7 @@ xo_printable2 (const char *str, int len, int bracesp);
  * Some roles need a name, some don't
  */
 #define XO_LINT_ROLES_NEEDING_NAME "V" /* Can't have empty name (:XX)*/
-#define XO_LINT_ROLES_NEEDING_NAME_OR_FORMAT "DELNPTUW" /* One or the other */
-#define XO_LINT_ROLES_NO_DEFAULT_FORMAT "DELNPTUW[]" /* No '%s' default */
+#define XO_LINT_ROLES_NEEDING_NAME_OR_FORMAT "DEFLNPTUW" /* One or the other */
 #define XO_LINT_ROLES_OPTIONAL_NAME "CG"      /* Might have empty name */
 #define XO_LINT_ROLES_DEC_NAME_OR_FORMAT "[]"	       /* ":XX" or "/%d"" */
 #define XO_LINT_ROLES_NO_FORMAT "G"	       /* Can't have a format (/XX) */

@@ -194,6 +194,23 @@ scan_format_args (const char *field_fmt, unsigned flen,
 	    continue;
 	}
 
+        /*
+         * "%@...@" is an XO-specific prefix: each '*' between the two
+         * '@'s marks an int arg that must be consumed and discarded
+         * before the real conversion's own args are pulled (see
+         * xo_parse_one_format() in xo_format.c).  Record one int arg
+         * per '*', then treat the closing '@' as the pseudo '%' and
+         * keep parsing the rest of the spec from there.
+         */
+        if (*p == '@') {
+            for (p += 1; p < end && *p != '@'; p++) {
+                if (*p == '*')
+                    arg_cb(arg_data, "%d", 2);
+            }
+            if (p < end)
+                p += 1;  /* skip the closing '@' (pseudo '%') */
+        }
+
         /* flags */
         while (p < end && (*p == '-' || *p == '+' || *p == ' '
 			   || *p == '0' || *p == '#' || *p == '\''))
@@ -340,13 +357,26 @@ xo_shim_parse_args (const char *fmt,
             arg_cb(arg_data, NULL, 0);
 
 	else {
+	    int no_name = (xfip->xfi_flags & XFF_DISPLAY_ONLY) != 0;
+	    const char use_instead[] = "use 'F'/format role instead";
+
 	    /* Enforce name/format restrictions */
-	    if (strchr(XO_LINT_ROLES_NEEDING_NAME, ftype)
-			&& xfip->xfi_clen == 0)
-		ss_err.error(ss_err.data,
-			     "field role ('%c') requires a non-empty name: "
-			     "'%s'",
-			     ftype, xo_printable2(str, slen, 1));
+	    if ((flags & XPF_LINT) && strchr(XO_LINT_ROLES_NEEDING_NAME, ftype)
+			&& xfip->xfi_clen == 0) {
+		const char *role_name = xo_lookup_role_name(ftype);
+		if (no_name)
+		    ss_err.error(ss_err.data,
+				 "value field ('%c'%s%s) has empty name, but "
+				 "has the 'display' flag set; %s: '%s'",
+				 ftype, role_name ? "/" : "", role_name ?: "",
+				 use_instead, xo_printable2(str, slen, 1));
+		else 
+		    ss_err.error(ss_err.data,
+				 "field role ('%c'%s%s) requires a non-empty "
+				 "name: '%s'",
+				 ftype, role_name ? "/" : "", role_name ?: "",
+				 xo_printable2(str, slen, 1));
+	    }
 
 	    /*
 	     * xfi_format >= 0 means an explicit format was written in the
@@ -355,11 +385,14 @@ xo_shim_parse_args (const char *fmt,
 	     * Only error when the user wrote neither content nor format.
 	     */
 	    if (strchr(XO_LINT_ROLES_NEEDING_NAME_OR_FORMAT, ftype)
-		&& xfip->xfi_clen == 0 && xfip->xfi_format < 0)
+		    && xfip->xfi_clen == 0 && xfip->xfi_format < 0) {
+		const char *role_name = xo_lookup_role_name(ftype);
 		ss_err.error(ss_err.data,
-			     "field role ('%c') requires a name or format: "
+			     "field role ('%c'%s%s) requires a name or format: "
 			     "'%s'",
-			     ftype, xo_printable2(str, slen, 1));
+			     ftype, role_name ? "/" : "", role_name ?: "",
+			     xo_printable2(str, slen, 1));
+	    }
 
 	    if (strchr(XO_LINT_ROLES_NO_FORMAT, ftype)
 			&& xfip->xfi_format != XO_FOFF_NONE)

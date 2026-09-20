@@ -130,9 +130,16 @@
         t.style.left = left + "px";
     }
 
-    function wireTooltips () {
-        var els = document.querySelectorAll("#xohtml-content .data[data-tag]");
+    function wireTooltips (root) {
+        var scope = root || document.getElementById("xohtml-content");
+        if (!scope)
+            return;
+
+        var els = scope.querySelectorAll(".data[data-tag]");
         for (var i = 0; i < els.length; i++) {
+            if (els[i].dataset.tipWired)
+                continue;
+            els[i].dataset.tipWired = "1";
             els[i].addEventListener("mouseenter", (function (el) {
                 return function () { showTip(el); };
             })(els[i]));
@@ -180,6 +187,126 @@
         return groups;
     }
 
+    /*
+     * Untitled record dumps ("Item 'gum': / Total sold: ... / SKU: ...")
+     * have no title line to key off of, but libxo stamps every field
+     * belonging to the same list/instance with a shared, monotonically
+     * increasing data-ident (xo_depth_change in libxo.c).  Opening a new
+     * list or instance always burns an id that never appears on a field,
+     * so unrelated lists never end up with contiguous idents even when
+     * their field shapes are identical -- a run of contiguous idents is
+     * exactly one table.
+     */
+
+    function rowIdent (line) {
+        var el = line.querySelector(".data[data-tag][data-ident]");
+        return el ? el.getAttribute("data-ident") : null;
+    }
+
+    function humanizeTag (tag) {
+        return tag.split("-").map(function (word) {
+            return word.charAt(0).toUpperCase() + word.slice(1);
+        }).join(" ");
+    }
+
+    function rowShape (rowLines) {
+        var tags = [];
+        rowLines.forEach(function (line) {
+            var cells = line.querySelectorAll(".data[data-tag]");
+            for (var i = 0; i < cells.length; i++)
+                tags.push(cells[i].getAttribute("data-tag"));
+        });
+        return tags.sort().join(",");
+    }
+
+    /*
+     * A run of contiguous idents is only one table if every row also
+     * has the same set of field tags.  This matters because opening a
+     * leaf-list burns exactly one ident (like a list/instance does)
+     * but never gives its individual values idents of their own, so
+     * a single-instance record immediately followed by a leaf-list
+     * can land on contiguous idents despite being unrelated -- e.g. a
+     * lone "fish" instance (ident N) followed by an "item" leaf-list
+     * (ident N+1, one shared ident across all its values).  Without
+     * the shape check, that leaf-list's last value would get merged
+     * in as a bogus extra row.
+     */
+    function findIdentGroups (content, used) {
+        var lines = content.querySelectorAll("div.line");
+        var groups = [];
+
+        var rows = [];
+        var groupShape = null;
+        var lastIdent = null;
+        var curIdent = null;
+        var curLines = [];
+
+        function closeGroup () {
+            if (rows.length >= 2)
+                groups.push({ rows: rows });
+            rows = [];
+            groupShape = null;
+            lastIdent = null;
+        }
+
+        function commitRow () {
+            if (!curLines.length)
+                return;
+
+            var shape = rowShape(curLines);
+            var contiguous = lastIdent !== null
+                && Number(curIdent) === Number(lastIdent) + 1;
+
+            if (rows.length && (!contiguous || shape !== groupShape))
+                closeGroup();
+
+            if (!rows.length)
+                groupShape = shape;
+
+            rows.push(curLines);
+            lastIdent = curIdent;
+            curLines = [];
+        }
+
+        for (var i = 0; i < lines.length; i++) {
+            var line = lines[i];
+            var ident = used.has(line) ? null : rowIdent(line);
+
+            if (ident === null) {
+                commitRow();
+                closeGroup();
+                curIdent = null;
+                continue;
+            }
+
+            if (curIdent !== null && ident !== curIdent)
+                commitRow();
+
+            curIdent = ident;
+            curLines.push(line);
+        }
+        commitRow();
+        closeGroup();
+
+        return groups;
+    }
+
+    /*
+     * A table cell needs both the trimmed display/sort text and a
+     * copy of the source .data div (data-help/type/units/xpath) so
+     * the generated <td> can still drive the tooltip.  The source
+     * div was already wired at init() time, so cloneNode() would
+     * otherwise copy its data-tip-wired marker along with it and
+     * make wireTooltips() skip attaching a listener to the clone.
+     */
+    function cellValue (el) {
+        var text = el.textContent.trim();
+        var clone = el.cloneNode(false);
+        delete clone.dataset.tipWired;
+        clone.textContent = text;
+        return { text: text, el: clone };
+    }
+
     function buildModel (group) {
         var columns = [];
         var seen = {};
@@ -197,7 +324,7 @@
                     seen[tag] = true;
                     columns.push(tag);
                 }
-                rowData[tag] = cells[c].textContent.trim();
+                rowData[tag] = cellValue(cells[c]);
             }
             rows.push(rowData);
         }
@@ -209,6 +336,45 @@
         var labels = columns.map(function (tag, i) {
             var text = titleDivs[i] ? titleDivs[i].textContent : tag;
             return text.trim() || tag;
+        });
+
+        return { columns: columns, labels: labels, rows: rows };
+    }
+
+    function buildIdentModel (group) {
+        var columns = [];
+        var labelMap = {};
+        var rows = [];
+
+        group.rows.forEach(function (rowLines) {
+            var rowData = {};
+            var any = false;
+
+            rowLines.forEach(function (line) {
+                var cells = line.querySelectorAll(".data[data-tag]");
+                var label = line.querySelector(".label");
+                var labelText = label ? label.textContent.trim() : null;
+
+                for (var c = 0; c < cells.length; c++) {
+                    var tag = cells[c].getAttribute("data-tag");
+                    if (!(tag in labelMap)) {
+                        labelMap[tag] = labelText || humanizeTag(tag);
+                        columns.push(tag);
+                    }
+                    rowData[tag] = cellValue(cells[c]);
+                    any = true;
+                }
+            });
+
+            if (any)
+                rows.push(rowData);
+        });
+
+        if (!columns.length || rows.length < 2)
+            return null;
+
+        var labels = columns.map(function (tag) {
+            return labelMap[tag];
         });
 
         return { columns: columns, labels: labels, rows: rows };
@@ -246,7 +412,9 @@
                 sortCol = i;
 
                 model.rows.sort(function (ra, rb) {
-                    return sortDir * compareValues(ra[tag], rb[tag]);
+                    var va = ra[tag] ? ra[tag].text : "";
+                    var vb = rb[tag] ? rb[tag].text : "";
+                    return sortDir * compareValues(va, vb);
                 });
 
                 ths.forEach(function (other, oi) {
@@ -273,11 +441,14 @@
                 var tr = document.createElement("tr");
                 model.columns.forEach(function (tag) {
                     var td = document.createElement("td");
-                    td.textContent = rowData[tag] || "";
+                    var cell = rowData[tag];
+                    if (cell)
+                        td.appendChild(cell.el.cloneNode(true));
                     tr.appendChild(td);
                 });
                 tbody.appendChild(tr);
             });
+            wireTooltips(tbody);
         }
 
         renderBody();
@@ -285,14 +456,36 @@
         return table;
     }
 
-    function setupTableView () {
-        var content = document.getElementById("xohtml-content");
-        if (!content)
-            return;
+    function addToggle (table, lines, anchor, place) {
+        var toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "xohtml-view-toggle";
+        toggle.textContent = "Table view";
 
+        toggle.addEventListener("click", function () {
+            var on = table.style.display === "none";
+            table.style.display = on ? "table" : "none";
+            lines.forEach(function (line) {
+                line.style.display = on ? "none" : "";
+            });
+            toggle.textContent = on ? "Line view" : "Table view";
+        });
+
+        if (place === "append")
+            anchor.appendChild(toggle);
+        else
+            anchor.insertAdjacentElement(place, toggle);
+
+        return toggle;
+    }
+
+    function setupTitledGroups (content, used) {
         var groups = findGroups(content);
 
         groups.forEach(function (group) {
+            used.add(group.header);
+            group.rows.forEach(function (row) { used.add(row); });
+
             var model = buildModel(group);
             if (!model)
                 return;
@@ -301,22 +494,46 @@
             table.style.display = "none";
             group.header.insertAdjacentElement("afterend", table);
 
-            var toggle = document.createElement("button");
-            toggle.type = "button";
-            toggle.className = "xohtml-view-toggle";
-            toggle.textContent = "Table view";
+            addToggle(table, group.rows, group.header, "append");
+        });
+    }
 
-            toggle.addEventListener("click", function () {
-                var on = table.style.display === "none";
-                table.style.display = on ? "table" : "none";
-                group.rows.forEach(function (row) {
-                    row.style.display = on ? "none" : "";
+    function setupIdentGroups (content, used) {
+        var groups = findIdentGroups(content, used);
+
+        groups.forEach(function (group) {
+            var model = buildIdentModel(group);
+            if (!model)
+                return;
+
+            var allLines = [];
+            group.rows.forEach(function (rowLines) {
+                rowLines.forEach(function (line) {
+                    allLines.push(line);
                 });
-                toggle.textContent = on ? "Line view" : "Table view";
             });
 
-            group.header.appendChild(toggle);
+            var table = buildTable(model);
+            table.style.display = "none";
+            allLines[allLines.length - 1]
+                .insertAdjacentElement("afterend", table);
+
+            var bar = document.createElement("div");
+            bar.className = "line xohtml-ident-toggle";
+            allLines[0].insertAdjacentElement("beforebegin", bar);
+
+            addToggle(table, allLines, bar, "append");
         });
+    }
+
+    function setupTableView () {
+        var content = document.getElementById("xohtml-content");
+        if (!content)
+            return;
+
+        var used = new Set();
+        setupTitledGroups(content, used);
+        setupIdentGroups(content, used);
     }
 
     function init () {

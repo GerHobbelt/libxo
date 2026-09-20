@@ -165,7 +165,6 @@ xo_name_lookup (xo_flag_mapping_t *map, const char *value, ssize_t len)
     return 0;
 }
 
-#ifdef NOT_NEEDED_YET
 static const char *
 xo_value_lookup (xo_flag_mapping_t *map, xo_xff_flags_t value)
 {
@@ -178,15 +177,15 @@ xo_value_lookup (xo_flag_mapping_t *map, xo_xff_flags_t value)
 
     return NULL;
 }
-#endif /* NOT_NEEDED_YET */
 
 /*
  * Role and modifier tables
  */
-static xo_flag_mapping_t xo_role_names[] = {
+xo_flag_mapping_t xo_role_names[] = {
     { 'C', "color" },
     { 'D', "decoration" },
     { 'E', "error" },
+    { 'F', "format" },
     { 'L', "label" },
     { 'N', "note" },
     { 'P', "padding" },
@@ -230,6 +229,15 @@ static xo_flag_mapping_t xo_modifier_names[] = {
 };
 
 const char xo_default_format[] = "%s";
+
+/*
+ * Look up the name of a role
+ */
+const char *
+xo_lookup_role_name (uint32_t value)
+{
+    return xo_value_lookup(xo_role_names, value);
+}
 
 int
 xo_role_wants_default_format (int ftype)
@@ -575,6 +583,7 @@ xo_parse_roles (xo_parse_t *xpp, const char *fmt,
 	case 'C':
 	case 'D':
 	case 'E':
+	case 'F':
 	case 'G':
 	case 'L':
 	case 'N':
@@ -679,6 +688,7 @@ xo_parse_field_numbers (xo_parse_t *xpp, const char *fmt,
  * Roles are optional and include the following field types:
  *   'D': decoration; something non-text and non-data (colons, commmas)
  *   'E': error message
+ *   'F': format text
  *   'G': gettext() the entire string; optional domainname as content
  *   'L': label; text preceding data
  *   'N': note; text following data
@@ -963,11 +973,14 @@ xo_parse_fields (xo_parse_t *xpp, const char *fmt, size_t fmt_len)
 	    unsigned nlen = (unsigned)xfip->xfi_clen;
 	    unsigned ni;
 
+#if 0
 	    if (nlen == 0 && !(xfip->xfi_flags & XFF_ARGUMENT)) {
 		xo_parse_error(xpp, "field must have a name: '%s'",
 			       xo_printable2(str, slen, TRUE));
 		return -1;
 	    }
+#endif
+
 	    if (np && nlen) {
 		if (isdigit((unsigned char) np[0])) {
 		    xo_parse_warning(xpp,
@@ -1043,7 +1056,7 @@ xo_parse_fields (xo_parse_t *xpp, const char *fmt, size_t fmt_len)
 	    if (format && flen > 0) {
 		/* Anchor width must be "%d" or numeric */
 		if (flen != 2 || format[0] != '%'
-		        || !(format[1] != 'd' || format[1] != 'u')) {
+		        || !(format[1] == 'd' || format[1] == 'u')) {
 		    char *aep = NULL;
 		    (void) strtol(format, &aep, 10);
 		    if (aep != format + flen)

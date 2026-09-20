@@ -3131,10 +3131,11 @@ static ssize_t
 xo_format_string (xo_handle_t *xop, xo_fspec_t *xfp, xo_buffer_t *xbp,
 		  xo_xff_flags_t flags, int enc)
 {
-    static char null[] = "(null)";
-    static char null_no_quotes[] = "null";
+    int null_as_empty = (xfp->xf_extflags & XXF_NULL_AS_EMPTY) ? 1 : 0;
+    const char *null = null_as_empty ? "" : "(null)";
+    const char *null_no_quotes = null_as_empty ? "" : "null";
 
-    char *cp = NULL;
+    const char *cp = NULL;
     wchar_t *wcp = NULL;
     ssize_t len;
     ssize_t cols = 0, rc = 0;
@@ -3163,7 +3164,7 @@ xo_format_string (xo_handle_t *xop, xo_fspec_t *xfp, xo_buffer_t *xbp,
 	 */
 	if (wcp == NULL) {
 	    cp = null;
-	    len = sizeof(null) - 1;
+	    len = (xfp->xf_extflags & XXF_NULL_AS_EMPTY) ? 0 : strlen(cp);
 	}
 
     } else {
@@ -3175,13 +3176,12 @@ xo_format_string (xo_handle_t *xop, xo_fspec_t *xfp, xo_buffer_t *xbp,
 
 	/* Echo "Dont' deref NULL" logic */
 	if (cp == NULL) {
-	    if ((flags & XFF_NO_QUOTE) && xo_style_is_encoding(xop)) {
+	    if ((flags & XFF_NO_QUOTE) && xo_style_is_encoding(xop))
 		cp = null_no_quotes;
-		len = sizeof(null_no_quotes) - 1;
-	    } else {
+	    else
 		cp = null;
-		len = sizeof(null) - 1;
-	    }
+	
+	    len = null_as_empty ? 0 : strlen(cp);
 	}
 
 	/*
@@ -3237,15 +3237,16 @@ xo_format_string (xo_handle_t *xop, xo_fspec_t *xfp, xo_buffer_t *xbp,
 	 * If seen_minus, then pad on the right; otherwise move it so
 	 * we can pad on the left.
 	 */
+	char *np;
 	if (xfp->xf_seen_minus) {
-	    cp = xbp->xb_curp + rc;
+	    np = xbp->xb_curp + rc;
 	} else {
-	    cp = xbp->xb_curp;
+	    np = xbp->xb_curp;
 	    memmove(xbp->xb_curp + delta, xbp->xb_curp, rc);
 	}
 
 	/* Set the padding */
-	memset(cp, (xfp->xf_leading_zero > 0) ? '0' : ' ', delta);
+	memset(np, (xfp->xf_leading_zero > 0) ? '0' : ' ', delta);
 	rc += delta;
 	cols += delta;
     }
@@ -4075,11 +4076,11 @@ xo_do_format_field (xo_handle_t *xop, const xo_field_info_t *xfip,
         xo_xff_flags_t field_flags = flags;
 
         /* Hidden fields are only visible to JSON and XML */
-        if (XOF_ISSET(xop, XFF_ENCODE_ONLY)) {
+        if (flags & XFF_ENCODE_ONLY) {
             if (style != XO_STYLE_XML
                     && !xo_style_is_encoding(xop))
                 field_flags |= XFF_SKIP;
-        } else if (XOF_ISSET(xop, XFF_DISPLAY_ONLY)) {
+        } else if (flags & XFF_DISPLAY_ONLY) {
             if (style != XO_STYLE_TEXT
                     && xo_style(xop) != XO_STYLE_HTML)
                 field_flags |= XFF_SKIP;
@@ -4910,14 +4911,28 @@ xo_format_title (xo_handle_t *xop, const xo_field_info_t *xfip,
     ssize_t flen = xfip->xfi_flen;
     xo_xff_flags_t flags = xfip->xfi_flags;
 
-    static char div_open[] = "<div class=\"title";
+    static char div_open[] = "<div class=\"";
     static char div_middle[] = "\">";
     static char div_close[] = "</div>";
+    const char *class_name = (xfip->xfi_ftype == 'F') ? "text" : "title";
 
     if (flen == 0) {
 	fmt = "%s";
 	flen = 2;
 	xfip = &xo_default_field_info;
+    }
+
+    /*
+     * 'F' formats exactly like titles, but only appear in display styles
+     */
+    if (xfip->xfi_ftype == 'F' && xo_style_is_encoding(xop)) {
+	/*
+	 * Even though we don't care about 'format' fields in
+	 * encoding, we need to do enough parsing work to skip over
+	 * the right bits of xo_vap.
+	 */
+	xo_simple_field(xop, xfip, TRUE, value, vlen, fmt, flen, flags);
+	return;
     }
 
     switch (xo_style(xop)) {
@@ -4943,6 +4958,7 @@ xo_format_title (xo_handle_t *xop, const xo_field_info_t *xfip,
 	if (XOF_ISSET(xop, XOF_PRETTY))
 	    xo_buf_indent(xop, xop->xo_indent_by);
 	xo_buf_append(&xop->xo_data, div_open, sizeof(div_open) - 1);
+	xo_buf_append(&xop->xo_data, class_name, strlen(class_name));
 	xo_color_append_html(xop);
 	xo_buf_append(&xop->xo_data, div_middle, sizeof(div_middle) - 1);
     }
@@ -7379,6 +7395,7 @@ xo_class_name (int ftype)
     switch (ftype) {
     case 'D': return "decoration";
     case 'E': return "error";
+    case 'F': return NULL;
     case 'L': return "label";
     case 'N': return "note";
     case 'P': return "padding";
@@ -8097,6 +8114,8 @@ xo_do_emit_fields (xo_handle_t *xop, const xo_field_info_t *fields,
 				  xfip->xfi_flen, flags);
 	    else if (ftype == 'T')
 		xo_format_title(xop, xfip, base_fmt, content, clen);
+	    else if (ftype == 'F') /* 'format' works like like titles */
+		xo_format_title(xop, xfip, base_fmt, content, clen);
 	    else if (ftype == 'U')
 		xo_format_units(xop, xfip, base_fmt, content, clen);
 	    else
@@ -8763,7 +8782,7 @@ xo_depth_change (xo_handle_t *xop, const char *name,
 	xo_stack_set_flags(xop);
 
 	XO_DBG(xop, "xo_depth_change: '%s' depth %d, state %u=%s, "
-	       "status %u=%s,  rb_off %d, rb_flags %#x, ident = %d",
+	       "status %u=%s,  rb_off %d, rb_flags %#x, ident = %u",
 	       name, xop->xo_depth + delta,
 	       state, xo_state_name(state),
 	       fstatus, xo_filt_status_name(fstatus),
