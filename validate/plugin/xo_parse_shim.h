@@ -17,6 +17,8 @@
 #ifndef XO_PARSE_SHIM_H
 #define XO_PARSE_SHIM_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -53,6 +55,39 @@ typedef void (*xo_shim_arg_cb_t)(void *data, const char *fmt, unsigned fmtlen);
 int xo_shim_parse_args(const char *fmt,
                         xo_shim_error_t error_cb, void *error_data,
                         xo_shim_arg_cb_t arg_cb,   void *arg_data);
+
+/*
+ * Offset-based field record: mirrors xo_field_info_t but uses only plain C
+ * types so this header remains safe for C++ consumers.  Member names, order,
+ * and integer widths match the real struct exactly; the C shim copies
+ * field-by-field.
+ */
+typedef struct xo_shim_field_s {
+    uint64_t xsf_flags;    /* xfi_flags (xo_xff_flags_t) */
+    uint32_t xsf_ftype;    /* xfi_ftype */
+    int16_t  xsf_start;    /* xfi_start */
+    int16_t  xsf_content;  /* xfi_content */
+    int16_t  xsf_format;   /* xfi_format */
+    int16_t  xsf_encoding; /* xfi_encoding */
+    int16_t  xsf_next;     /* xfi_next */
+    int16_t  xsf_len;      /* xfi_len */
+    int16_t  xsf_clen;     /* xfi_clen */
+    int16_t  xsf_flen;     /* xfi_flen */
+    int16_t  xsf_elen;     /* xfi_elen */
+    uint32_t xsf_fnum;     /* xfi_fnum */
+    uint32_t xsf_renum;    /* xfi_renum */
+} xo_shim_field_t;
+
+typedef void (*xo_shim_field_cb_t)(void *data, const xo_shim_field_t *f);
+
+/*
+ * Parse fmt and call field_cb once per field with the offset-based field
+ * descriptor.  Calls error_cb on syntax problems.
+ * Returns 0 on success, -1 on parse error.
+ */
+int xo_shim_parse_fields(const char *fmt,
+                          xo_shim_error_t error_cb, void *error_data,
+                          xo_shim_field_cb_t field_cb, void *field_data);
 
 #ifdef __cplusplus
 }
