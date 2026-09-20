@@ -53,9 +53,9 @@ typedef double xo_float_t;	/* Our floating point type */
  * At init time all parsed XPath expressions are compiled into a shared
  * prefix-trie so expressions with common prefixes share nodes.
  *
- * At runtime a stack of xo_tframe_t frames (one per nesting depth)
- * replaces the old xo_match_t linked list.  Each frame records which
- * trie nodes are currently active and in what sub-state.
+ * At runtime a stack of xo_tframe_t frames (one per nesting depth).
+ * Each frame records which trie nodes are currently active and in
+ * what sub-state.
  */
 typedef uint32_t xo_trie_id_t;	/* Index trie node array (1-based; 0=none) */
 
@@ -97,14 +97,29 @@ typedef struct xo_trie_s {
 typedef struct xo_tframe_s {
     uint8_t xtf_count;		/* # of active slots */
     uint8_t xtf_state[XO_TFRAME_MAX]; /* XTFS_* per slot */
+    uint8_t xtf_flags[XO_TFRAME_MAX]; /* XTFF_* per slot */
     xo_trie_id_t xtf_node[XO_TFRAME_MAX]; /* trie node id per slot */
+    uint32_t xtf_position[XO_TFRAME_MAX]; /* 1-based open position per slot */
+    uint32_t xtf_qual_position[XO_TFRAME_MAX]; /* qualified position (leading-pred-gated) */
     int16_t xtf_allow_delta;	/* allow contribution to undo on pop */
     int16_t xtf_deny_delta;	/* deny contribution to undo on pop */
     char *xtf_keys;		/* buffered "k\0v\0k2\0v2\0\0" pairs */
     ssize_t xtf_keys_len;
     char *xtf_attrs;		/* buffered "@k\0v\0..." pairs (attributes) */
     ssize_t xtf_attrs_len;
+    uint32_t xtf_position_cur;  /* scratch: position for current C_INDEX eval */
+    /* Child sibling counters (tracked in the PARENT frame, survive close) */
+    uint8_t xtf_child_ncount;
+    xo_trie_id_t xtf_child_node[XO_TFRAME_MAX];
+    uint32_t xtf_child_count_val[XO_TFRAME_MAX];
+    /* Qualified child counters: only count when leading predicates pass */
+    uint8_t xtf_child_qual_ncount;
+    xo_trie_id_t xtf_child_qual_node[XO_TFRAME_MAX];
+    uint32_t xtf_child_qual_val[XO_TFRAME_MAX];
 } xo_tframe_t;
+
+/* Per-slot flags (xtf_flags[]) */
+#define XTFF_QUAL_COUNTED  (1 << 0)  /* leading-pred qualified position counted */
 
 /* Per-slot states */
 #define XTFS_SEEK	0	/* Waiting for this node's element name */
@@ -114,15 +129,14 @@ typedef struct xo_tframe_s {
 
 /*
  * Runtime matching state: a stack of frames driven by open/close events.
- * Replaces the old xo_match_t linked list.
  */
 typedef struct xo_tmatch_s {
-    xo_trie_t *xm_trie;	        /* The compiled trie */
-    uint32_t xm_depth;	        /* Current stack depth */
-    uint32_t xm_cap;	        /* Allocated frame count */
-    xo_tframe_t *xm_stack;	/* Frame stack [0..xm_depth] */
-    uint32_t xm_allow;          /* Active allow-match count */
-    uint32_t xm_deny;           /* Active deny-match count */
+    xo_trie_t *xtm_trie;	        /* The compiled trie */
+    uint32_t xtm_depth;	        /* Current stack depth */
+    uint32_t xtm_cap;	        /* Allocated frame count */
+    xo_tframe_t *xtm_stack;	/* Frame stack [0..xtm_depth] */
+    uint32_t xtm_allow;          /* Active allow-match count */
+    uint32_t xtm_deny;           /* Active deny-match count */
 } xo_tmatch_t;
 
 /*
@@ -166,6 +180,9 @@ xo_trie_get_wildcard_child (xo_trie_t *xtp, xo_trie_id_t parent)
     if (id == 0)
 	return 0;
 
+    /* xo_trie_alloc_node may have realloced xt_nodes; recalculate listp */
+    listp = parent ? &xtp->xt_nodes[parent].xtn_child : &xtp->xt_root;
+
     xtp->xt_nodes[id].xtn_flags |= XTNF_WILDCARD;
     xtp->xt_nodes[id].xtn_sibling = *listp;
     *listp = id;
@@ -191,6 +208,9 @@ xo_trie_get_child (xo_trie_t *xtp, xo_trie_id_t parent, xo_off_t name_id)
     xo_trie_id_t id = xo_trie_alloc_node(xtp);
     if (id == 0)
 	return 0;
+
+    /* xo_trie_alloc_node may have realloced xt_nodes; recalculate listp */
+    listp = parent ? &xtp->xt_nodes[parent].xtn_child : &xtp->xt_root;
 
     xtp->xt_nodes[id].xtn_name = name_id;
     xtp->xt_nodes[id].xtn_sibling = *listp;
@@ -373,51 +393,56 @@ xo_tframe_free_attrs (xo_tframe_t *frame)
 }
 
 static int
-xo_tmatch_init (xo_handle_t *xop UNUSED, xo_tmatch_t *xm, xo_trie_t *trie)
+xo_tmatch_init (xo_handle_t *xop UNUSED, xo_tmatch_t *xtmp, xo_trie_t *trie)
 {
-    bzero(xm, sizeof(*xm));
-    xm->xm_trie = trie;
+    bzero(xtmp, sizeof(*xtmp));
+    xtmp->xtm_trie = trie;
 
     uint32_t cap = 16;
-    xm->xm_stack = xo_realloc(NULL, cap * sizeof(*xm->xm_stack));
-    if (xm->xm_stack == NULL)
+    xtmp->xtm_stack = xo_realloc(NULL, cap * sizeof(*xtmp->xtm_stack));
+    if (xtmp->xtm_stack == NULL)
 	return -1;
-    bzero(xm->xm_stack, cap * sizeof(*xm->xm_stack));
-    xm->xm_cap = cap;
+
+    bzero(xtmp->xtm_stack, cap * sizeof(*xtmp->xtm_stack));
+    xtmp->xtm_cap = cap;
 
     /*
-     * Depth-0 frame: all root trie nodes are LIVE (they are the starting set)
+     * Depth-0 is an empty virtual frame.  The root re-probe loop in
+     * xo_tmatch_open matches root trie nodes at every real depth, so
+     * pre-seeding depth-0 with LIVE root nodes is wrong: it would let
+     * the parent-descent loop skip the first step of a multi-step path
+     * (e.g. "d/one" would match when "one" is opened directly).
      */
-    xo_tframe_t *root = &xm->xm_stack[0];
-    xo_trie_t *xtp = trie;
+#if defined(XO_DEBUG)
+    if (XOIF_ISSET(xop, XOF_DEBUG)) {
+	xo_trie_t *xtp = trie;
+	uint32_t root_count = 0;
+	for (xo_trie_id_t r = xtp->xt_root; r; r = xtp->xt_nodes[r].xtn_sibling)
+	    root_count += 1;
 
-    for (xo_trie_id_t r = xtp->xt_root; r && root->xtf_count < XO_TFRAME_MAX;
-	 r = xtp->xt_nodes[r].xtn_sibling) {
-	uint32_t s = root->xtf_count++;
-	root->xtf_node[s] = r;
-	root->xtf_state[s] = XTFS_LIVE;
+	xo_dbg(xop, "xo_tmatch_init: trie root nodes: %u", root_count);
     }
+#endif /* XO_DEBUG */
 
-    XO_DBG(xop, "xo_tmatch_init: trie root nodes: %u", root->xtf_count);
     return 0;
 }
 
 static void
-xo_tmatch_cleanup (xo_tmatch_t *xm)
+xo_tmatch_cleanup (xo_tmatch_t *xtmp)
 {
-    if (xm->xm_stack) {
-	for (uint32_t d = 0; d <= xm->xm_depth; d++) {
-	    xo_tframe_free_keys(&xm->xm_stack[d]);
-	    xo_tframe_free_attrs(&xm->xm_stack[d]);
+    if (xtmp->xtm_stack) {
+	for (uint32_t d = 0; d <= xtmp->xtm_depth; d++) {
+	    xo_tframe_free_keys(&xtmp->xtm_stack[d]);
+	    xo_tframe_free_attrs(&xtmp->xtm_stack[d]);
 	}
-	xo_free(xm->xm_stack);
-	xm->xm_stack = NULL;
+	xo_free(xtmp->xtm_stack);
+	xtmp->xtm_stack = NULL;
     }
 }
 
 /*
- * xo_tmatch_record_live/open/close/key and xo_tmatch_eval_pred all
- * reference types (xo_eval_value_t, xo_match_t, xo_filter_s fields)
+ * xo_tmatch_record_live/open/close/key and xo_filter_pred_eval all
+ * reference types (xo_eval_value_t, xo_tmatch_t, xo_filter_s fields)
  * defined later in this file.  They are placed after those definitions;
  * forward declarations appear here.
  */
@@ -430,83 +455,6 @@ static int xo_tmatch_try_eager(xo_handle_t *, xo_filter_t *, xo_tframe_t *,
 			       xo_xparse_node_id_t, xo_tnode_t *, xo_tmatch_t *);
 static void xo_filter_force_resolve_pred(xo_handle_t *, xo_filter_t *,
 					 const char *);
-
-/*
- * We maintain a set of filters (xo_filter_t), representing each
- * defined XPath.  The filter holds the output of the parser, and we
- * use the set of paths (xd_paths) defined by that parse.
- *
- * We maintain a set of active matches (xo_match_t), created when we
- * find an open tag matching one of those paths.  The match holds the
- * current state of that active matching effort.
- *
- * Each match include a stack (xo_stack_t) that references each node
- * in that xpath as we match it.  So "one/two/three" would be three
- * distinct items in the stack.
- *
- * xs_match is the current node we are matching on, with xs_predicates
- * holding any predicates for that node.
- *
- * We use xs_state to track the current state of the top of the stack:
- * XSS_INIT: Initial state (zero)
- * XSS_NEED: Looking for match (on xs_match)
- *    we are looking for a node to match xs_match
- *    when we find a match, we check for predicates:
- *    if there are predicates, set xs_predicates
- *    otherwise push the next element of the path
- * XSS_PRED: Looking for predicate; xs_match is match, but has a predicate
- *    we have matched the tag and are trying to test the predicates
- * XSS_DEEP: Found or not, we go deeper in hierarchy
- *    we are at the end of the patch and allow/deny the xpath
- * XSS_DEADEND: Failed match; permanently, so we don't care about other keys
- *
- * This means that the first node on the stack will always be the
- * first node of the path, even if it's not strictly needed.
- */
-
-typedef struct xo_stack_s {
-    uint32_t xs_state;		 /* Explict state (XSS_*) */
-    xo_xparse_node_id_t xs_match; /* Node that we are matching */
-    xo_xparse_node_id_t xs_predicates; /* Predicate node */
-    char *xs_keys;	         /* Keys stored as "key\0val\0k2\0v2\0\0"*/
-    xo_ssize_t xs_keys_len; 	 /* Length of xs_keys */
-    char *xs_attrs;		 /* Attributes stored as "k\0v\0k2\0v2\0\0" */
-    xo_ssize_t xs_attrs_len;	 /* Length of xs_attrs */
-    uint32_t xs_allow;		 /* Any 'allow' increment */
-    uint32_t xs_pred;		 /* Any 'pred' increment */
-    uint32_t xs_deny;		 /* Any 'deny' increment */
-    xo_off_t xs_offset;		 /* WB marker */
-    uint32_t xs_flags;		 /* Flags (XSF_*) */
-} xo_stack_t;
-
-/*
- * Each stack element has it's own state, which is resumed when the
- * layer above it is popped.
- */
-#define XSS_INIT	0	/* Initial state */
-#define XSS_FIRST	1	/* Top of stack; don't really need it but... */
-#define XSS_NEED	2	/* Looking for match */
-#define XSS_PRED	3	/* Looking for predicate */
-#define XSS_FOUND	4	/* Found a matching open */
-#define XSS_DEEP	5	/* Found or not, we go deeper in hierarchy */
-#define XSS_DEADEND	6	/* Dead hierarchy */
-
-/* Flags for xs_flags */
-#define XSF_DEAD	(1<<0)	/* Frame is dead */
-
-typedef struct xo_match_s {
-    struct xo_match_s *xm_next;	 /* Next match */
-    xo_xparse_node_id_t xm_base; /* Start node of this path */
-    uint32_t xm_depth;	         /* Number of "dead" containers past match */
-    uint32_t xm_flags;	         /* Flags for this match instance (XMF_*) */
-    xo_buffer_t xm_whiteboard;	 /* Whiteboard */
-    uint32_t xm_stack_size;	 /* Number of entries in the stack */
-    xo_stack_t *xm_stackp;	 /* Stack pointer (xo_stack) */
-    xo_stack_t xm_stack[0];	 /* Stack of nodes */
-} xo_match_t;
-
-/* Flags fpr xm_flags */
-#define XMF_NOT		(1<<0)	 /* Not expression ("!a") */
 
 typedef unsigned xo_xsf_flags_t;   /* Type for XFSF_* flag fields */
 
@@ -583,43 +531,111 @@ xo_filter_op_destroy (xo_handle_t *xop, xo_filter_t *xfp)
 }
 
 static void
-xo_tmatch_record_live (xo_tmatch_t *xm, xo_tframe_t *frame, xo_tnode_t *tn)
+xo_tmatch_record_live (xo_tmatch_t *xtmp, xo_tframe_t *frame, xo_tnode_t *tn)
 {
     if (!(tn->xtn_flags & XTNF_TERMINAL))
 	return;
 
     if (tn->xtn_flags & XTNF_NOT) {
-	xm->xm_deny++;
-	frame->xtf_deny_delta++;
+	xtmp->xtm_deny += 1;
+	frame->xtf_deny_delta += 1;
     } else {
-	xm->xm_allow++;
-	frame->xtf_allow_delta++;
+	xtmp->xtm_allow += 1;
+	frame->xtf_allow_delta += 1;
     }
+}
+
+/*
+ * Look up child trie node `c` in the parent's sibling-counter table,
+ * increment its count, and return the new (1-based) open position.
+ */
+static uint32_t
+xo_tframe_child_position (xo_tframe_t *parent, xo_trie_id_t c)
+{
+    for (uint32_t j = 0; j < parent->xtf_child_ncount; j++) {
+	if (parent->xtf_child_node[j] == c)
+	    return ++parent->xtf_child_count_val[j];
+    }
+    if (parent->xtf_child_ncount < XO_TFRAME_MAX) {
+	uint32_t j = parent->xtf_child_ncount++;
+	parent->xtf_child_node[j] = c;
+	parent->xtf_child_count_val[j] = 1;
+	return 1;
+    }
+    return 0; /* table full; can't track */
+}
+
+/*
+ * Like xo_tframe_child_position, but only counts opens where the leading
+ * (non-positional) predicates passed.  Stored in separate parallel counters
+ * in the parent frame so the two counts never interfere.
+ */
+static uint32_t
+xo_tframe_child_qualified_position (xo_tframe_t *parent, xo_trie_id_t c)
+{
+    for (uint32_t j = 0; j < parent->xtf_child_qual_ncount; j++) {
+	if (parent->xtf_child_qual_node[j] == c)
+	    return ++parent->xtf_child_qual_val[j];
+    }
+    if (parent->xtf_child_qual_ncount < XO_TFRAME_MAX) {
+	uint32_t j = parent->xtf_child_qual_ncount++;
+	parent->xtf_child_qual_node[j] = c;
+	parent->xtf_child_qual_val[j] = 1;
+	return 1;
+    }
+    return 0; /* table full; can't track */
+}
+
+/*
+ * Return TRUE if the predicate list has a C_INDEX predicate that is NOT
+ * the first predicate (meaning there are leading key/test predicates before it).
+ * foo[2]           → FALSE (C_INDEX is first, use open-time position)
+ * foo[x=1][2]      → TRUE  (C_INDEX is trailing, must use qualified position)
+ * foo[2][x=1]      → FALSE (C_INDEX is first)
+ */
+static int
+xo_pred_has_trailing_cindex (xo_filter_t *xfp, xo_xparse_node_id_t pred_id)
+{
+    int has_leading = FALSE;
+    xo_xparse_node_t *xnp;
+    for (xo_xparse_node_id_t id = pred_id; id; id = xnp->xn_next) {
+	xnp = xo_xparse_node(&xfp->xf_xd, id);
+	if (xnp->xn_type != C_PREDICATE)
+	    continue;
+	xo_xparse_node_id_t cid = xnp->xn_contents;
+	int is_cindex = cid
+	    && xo_xparse_node(&xfp->xf_xd, cid)->xn_type == C_INDEX;
+	if (is_cindex && has_leading)
+	    return TRUE;
+	if (!is_cindex)
+	    has_leading = TRUE;
+    }
+    return FALSE;
 }
 
 static void
 xo_tmatch_open (xo_handle_t *xop, xo_filter_t *xfp UNUSED,
-		xo_tmatch_t *xm, const char *tag, ssize_t tlen)
+		xo_tmatch_t *xtmp, const char *tag, ssize_t tlen)
 {
-    xo_trie_t *xtp = xm->xm_trie;
+    xo_trie_t *xtp = xtmp->xtm_trie;
     xo_xparse_data_t *xdp = xtp->xt_xd;
 
-    if (xm->xm_depth + 1 >= xm->xm_cap) {
-	uint32_t cap = xm->xm_cap * 2;
-	xo_tframe_t *p = xo_realloc(xm->xm_stack, cap * sizeof(*p));
+    if (xtmp->xtm_depth + 1 >= xtmp->xtm_cap) {
+	uint32_t cap = xtmp->xtm_cap * 2;
+	xo_tframe_t *p = xo_realloc(xtmp->xtm_stack, cap * sizeof(*p));
 	if (p == NULL)
 	    return;
-	bzero(p + xm->xm_cap, (cap - xm->xm_cap) * sizeof(*p));
-	xm->xm_stack = p;
-	xm->xm_cap = cap;
+	bzero(p + xtmp->xtm_cap, (cap - xtmp->xtm_cap) * sizeof(*p));
+	xtmp->xtm_stack = p;
+	xtmp->xtm_cap = cap;
     }
 
-    xo_tframe_t *parent = &xm->xm_stack[xm->xm_depth];
-    xm->xm_depth++;
-    xo_tframe_t *frame = &xm->xm_stack[xm->xm_depth];
+    xo_tframe_t *parent = &xtmp->xtm_stack[xtmp->xtm_depth];
+    xtmp->xtm_depth += 1;
+    xo_tframe_t *frame = &xtmp->xtm_stack[xtmp->xtm_depth];
     bzero(frame, sizeof(*frame));
 
-    xo_dbg(xop, "xo_tmatch_open: depth %u tag '%.*s'", xm->xm_depth, tlen, tag);
+    xo_dbg(xop, "xo_tmatch_open: depth %u tag '%.*s'", xtmp->xtm_depth, tlen, tag);
 
     /* Descend from every LIVE parent slot */
     for (uint32_t i = 0; i < parent->xtf_count; i++) {
@@ -635,15 +651,19 @@ xo_tmatch_open (xo_handle_t *xop, xo_filter_t *xfp UNUSED,
 		    (nm == NULL || !xo_streqn(nm, tag, tlen)))
 		continue;
 
+	    uint32_t position = xo_tframe_child_position(parent, c);
 	    uint32_t s = frame->xtf_count++;
 	    frame->xtf_node[s] = c;
+	    frame->xtf_position[s] = position;
 
 	    if (tn->xtn_pred) {
+		frame->xtf_position_cur = position;
 		frame->xtf_state[s] =
-		    xo_tmatch_try_eager(xop, xfp, frame, tn->xtn_pred, tn, xm);
+		    xo_tmatch_try_eager(xop, xfp, frame, tn->xtn_pred,
+					tn, xtmp);
 	    } else {
 		frame->xtf_state[s] = XTFS_LIVE;
-		xo_tmatch_record_live(xm, frame, tn);
+		xo_tmatch_record_live(xtmp, frame, tn);
 	    }
 	}
     }
@@ -652,7 +672,7 @@ xo_tmatch_open (xo_handle_t *xop, xo_filter_t *xfp UNUSED,
     for (xo_trie_id_t r = xtp->xt_root; r && frame->xtf_count < XO_TFRAME_MAX;
 	 r = xtp->xt_nodes[r].xtn_sibling) {
 	xo_tnode_t *tn = &xtp->xt_nodes[r];
-	if ((tn->xtn_flags & XTNF_ABSOLUTE) && xm->xm_depth != 1)
+	if ((tn->xtn_flags & XTNF_ABSOLUTE) && xtmp->xtm_depth != 1)
 	    continue;
 
 	const char *nm = xo_xparse_str(xdp, tn->xtn_name);
@@ -672,43 +692,46 @@ xo_tmatch_open (xo_handle_t *xop, xo_filter_t *xfp UNUSED,
 	if (dup)
 	    continue;
 
+	uint32_t position = xo_tframe_child_position(parent, r);
 	uint32_t s = frame->xtf_count++;
 	frame->xtf_node[s] = r;
+	frame->xtf_position[s] = position;
 
 	if (tn->xtn_pred) {
+	    frame->xtf_position_cur = position;
 	    frame->xtf_state[s] =
-		xo_tmatch_try_eager(xop, xfp, frame, tn->xtn_pred, tn, xm);
+		xo_tmatch_try_eager(xop, xfp, frame, tn->xtn_pred, tn, xtmp);
 	} else {
 	    frame->xtf_state[s] = XTFS_LIVE;
-	    xo_tmatch_record_live(xm, frame, tn);
+	    xo_tmatch_record_live(xtmp, frame, tn);
 	}
     }
 
     xo_dbg(xop, "xo_tmatch_open: frame %u active [allow %u/deny %u]",
-	   frame->xtf_count, xm->xm_allow, xm->xm_deny);
+	   frame->xtf_count, xtmp->xtm_allow, xtmp->xtm_deny);
 }
 
 static void
 xo_tmatch_close (xo_handle_t *xop, xo_filter_t *xfp UNUSED,
-		 xo_tmatch_t *xm, const char *tag UNUSED, ssize_t tlen UNUSED)
+		 xo_tmatch_t *xtmp, const char *tag UNUSED, ssize_t tlen UNUSED)
 {
-    if (xm->xm_depth == 0)
+    if (xtmp->xtm_depth == 0)
 	return;
 
-    xo_tframe_t *frame = &xm->xm_stack[xm->xm_depth];
-    xm->xm_allow -= frame->xtf_allow_delta;
-    xm->xm_deny  -= frame->xtf_deny_delta;
+    xo_tframe_t *frame = &xtmp->xtm_stack[xtmp->xtm_depth];
+    xtmp->xtm_allow -= frame->xtf_allow_delta;
+    xtmp->xtm_deny  -= frame->xtf_deny_delta;
     xo_tframe_free_keys(frame);
     xo_tframe_free_attrs(frame);
 
     xo_dbg(xop, "xo_tmatch_close: depth %u [allow %u/deny %u]",
-	   xm->xm_depth, xm->xm_allow, xm->xm_deny);
+	   xtmp->xtm_depth, xtmp->xtm_allow, xtmp->xtm_deny);
 
-    xm->xm_depth--;
+    xtmp->xtm_depth -= 1;
 }
 
 /*
- * xo_tmatch_eval_pred and xo_tmatch_key reference xo_eval_value_t and
+ * xo_filter_pred_eval and xo_tmatch_key reference xo_eval_value_t and
  * other types defined later; they are placed after xo_filter_pred_eval.
  */
 static xo_filter_status_t xo_tmatch_key(xo_handle_t *, xo_filter_t *,
@@ -735,10 +758,10 @@ xo_filter_op_add_one (xo_handle_t *xop, const char *input)
 
     if (rc == 0) {
 	static int unsupported_tokens[] = {
-	    L_DOTDOT, L_DOTDOTDOT, L_DOT, L_STAR,
+	    L_DOTDOT, L_DOTDOTDOT, L_DOT,
 	    K_COMMENT, K_ID, K_KEY, K_NODE,
 	    K_PROCESSING_INSTRUCTION, K_TEXT,
-	    T_AXIS_NAME, T_VAR, M_SEQUENCE, C_DESCENDANT, C_INDEX,
+	    T_AXIS_NAME, T_VAR, M_SEQUENCE, C_DESCENDANT,
 	    C_TEST, C_UNION, C_NESTED_PREDICATES, C_PREDICATE_PATHS,
 	    0
 	};
@@ -774,19 +797,6 @@ xo_filter_op_get_status (xo_handle_t *xop UNUSED, xo_filter_t *xfp)
 }
 
 /*
- * Turn a xo_filter_status_t into a string for debug output
- */
-static const char *
-xo_filter_op_status_name (xo_filter_status_t rc)
-{
-    return (rc == 0) ? "zero" :
-	(rc == XO_STATUS_TRACK) ? "track" :
-	(rc == XO_STATUS_FULL) ? "full" :
-	(rc == XO_STATUS_PRED) ? "predicate" :
-	(rc == XO_STATUS_DEAD) ? "dead" : "unknown";
-}
-
-/*
  * Update the status field.  Called when something may have affected it.
  * The "why" variable tracks why we are in this state, for debug output,
  * and maybe it should really be part of the status, but that would mean
@@ -809,11 +819,11 @@ xo_filter_change_status (xo_handle_t *xop UNUSED, xo_filter_t *xfp,
 	why = "no-filters";
 	rc = XO_STATUS_FULL;
 
-    } else if (xfp->xf_tmatch.xm_deny) {
+    } else if (xfp->xf_tmatch.xtm_deny) {
 	why = "deny-is-set";
 	rc = XO_STATUS_TRACK;		/* No means no */
 
-    } else if (xfp->xf_tmatch.xm_allow) {
+    } else if (xfp->xf_tmatch.xtm_allow) {
 	why = "allow-is-set";
 	rc = XO_STATUS_FULL;
 
@@ -829,9 +839,9 @@ xo_filter_change_status (xo_handle_t *xop UNUSED, xo_filter_t *xfp,
 	 * non-key predicate field, use PRED so all sibling content is
 	 * kept tentatively.
 	 */
-	xo_tmatch_t *xm = &xfp->xf_tmatch;
-	if (xm->xm_depth > 0) {
-	    xo_tframe_t *frame = &xm->xm_stack[xm->xm_depth];
+	xo_tmatch_t *xtmp = &xfp->xf_tmatch;
+	if (xtmp->xtm_depth > 0) {
+	    xo_tframe_t *frame = &xtmp->xtm_stack[xtmp->xtm_depth];
 	    for (uint32_t i = 0; i < frame->xtf_count; i++) {
 		if (frame->xtf_state[i] == XTFS_PRED) {
 		    why = "pred-pending";
@@ -840,6 +850,7 @@ xo_filter_change_status (xo_handle_t *xop UNUSED, xo_filter_t *xfp,
 		}
 	    }
 	}
+
 	why = "default-to-no";
 	rc = XO_STATUS_TRACK;
     done_status:;
@@ -851,8 +862,8 @@ xo_filter_change_status (xo_handle_t *xop UNUSED, xo_filter_t *xfp,
     XO_DBG(xop, "xo_filter_update_status (%s%s%.*s) returns %s/%d "
 	   "why: %s (was %s/%d)",
 	   op, tlen ? " " : "", tlen, tag,
-	   xo_filter_status_name(rc), rc, why,
-	   xo_filter_status_name(xfp->xf_status), xfp->xf_status);
+	   xo_filt_status_name(rc), rc, why,
+	   xo_filt_status_name(xfp->xf_status), xfp->xf_status);
 
     xfp->xf_status = rc;	/* Record new value */
 
@@ -949,7 +960,7 @@ xo_filter_op_close_instance (xo_handle_t *xop, xo_filter_t *xfp,
 
     /*
      * If force-resolve promoted us to FULL, return FULL even though the
-     * frame pop has now decremented xm_allow back.
+     * frame pop has now decremented xtm_allow back.
      */
     return (pre_close == XO_STATUS_FULL) ? XO_STATUS_FULL
 	: (xfp ? xfp->xf_status : XO_STATUS_ZERO);
@@ -969,12 +980,11 @@ xo_filter_op_close_container (xo_handle_t *xop UNUSED, xo_filter_t *xfp,
  */
 static const char *
 xo_filter_key_find (xo_filter_t *xfp UNUSED,
-		    xo_match_t *xmp, const char *tag)
+		    xo_tframe_t *framep, const char *tag)
 {
     xo_ssize_t off = 0;
-    xo_stack_t *xsp = xmp->xm_stackp; /* Only look at the top of stack */
-    xo_ssize_t len = xsp->xs_keys_len;
-    char *cp = xsp->xs_keys;
+    xo_ssize_t len = framep->xtf_keys_len;
+    char *cp = framep->xtf_keys;
     const char *match = NULL;
 
     while (off < len) {
@@ -997,12 +1007,11 @@ xo_filter_key_find (xo_filter_t *xfp UNUSED,
 
 static const char *
 xo_filter_attr_find (xo_filter_t *xfp UNUSED,
-		     xo_match_t *xmp, const char *tag)
+		     xo_tframe_t *framep, const char *tag)
 {
     xo_ssize_t off = 0;
-    xo_stack_t *xsp = xmp->xm_stackp;
-    xo_ssize_t len = xsp->xs_attrs_len;
-    char *cp = xsp->xs_attrs;
+    xo_ssize_t len = framep->xtf_attrs_len;
+    char *cp = framep->xtf_attrs;
     const char *match = NULL;
 
     while (off < len) {
@@ -1075,26 +1084,28 @@ typedef struct xo_eval_value_s {
 #define XO_EVAL_VALUE_MISSING {  .xev_flags = XEVF_MISSING }
 #define XO_EVAL_VALUE_UNSUPPORTED {  .xev_flags = XEVF_UNSUPPORTED }
 
-static xo_eval_value_t xo_tmatch_eval_pred(xo_handle_t *, xo_filter_t *,
+static xo_eval_value_t xo_filter_pred_eval(xo_handle_t *, xo_filter_t *,
 					   xo_tframe_t *, xo_xparse_node_id_t);
 static int xo_eval_cast_boolean(xo_handle_t *, xo_eval_value_t);
 
 #define XO_EVAL_OP_ARGS \
-    xo_handle_t *xop UNUSED, xo_filter_t *xfp UNUSED, xo_match_t *xmp UNUSED, \
+    xo_handle_t *xop UNUSED, xo_filter_t *xfp UNUSED, \
+	xo_tframe_t *framep UNUSED, \
 	xo_xparse_node_t *xnp UNUSED, const char *name UNUSED, \
-        int indent UNUSED,					\
+        int indent UNUSED, \
 	xo_eval_value_t left UNUSED, xo_eval_value_t right UNUSED
 
 #define XO_EVAL_OP_PASS \
-    xop, xfp, xmp, xnp, name, indent, left, right
+    xop, xfp, framep, xnp, name, indent, left, right
 
 typedef xo_eval_value_t (*xo_eval_op_fn_t)(XO_EVAL_OP_ARGS);
 
 #define XO_EVAL_NODE_ARGS \
-    xo_handle_t *xop UNUSED, xo_filter_t *xfp UNUSED, xo_match_t *xmp UNUSED, \
+    xo_handle_t *xop UNUSED, xo_filter_t *xfp UNUSED, \
+	xo_tframe_t *framep UNUSED, \
 	xo_xparse_node_t *xnp UNUSED, int indent UNUSED, \
 	int argc UNUSED, xo_eval_value_t *argv UNUSED
-#define XO_EVAL_NODE_PASS xop, xfp, xmp, xnp, indent, argc, argv
+#define XO_EVAL_NODE_PASS xop, xfp, framep, xnp, indent, argc, argv
 
 typedef xo_eval_value_t (*xo_eval_node_fn_t)(XO_EVAL_NODE_ARGS);
 
@@ -1117,12 +1128,12 @@ xo_eval_value_make (unsigned type, unsigned flags, xo_xparse_node_id_t id)
 }
 
 static inline void
-xo_eval_value_free (xo_eval_value_t v)
+xo_eval_value_free (xo_eval_value_t val)
 {
-    if (v.xev_type == C_DSTRING) {
+    if (val.xev_type == C_DSTRING && val.xev_str != NULL) {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wcast-qual"
-	xo_free((char *) v.xev_str);
+	xo_free((char *) val.xev_str);
 #pragma GCC diagnostic pop
     }
 }
@@ -1172,6 +1183,20 @@ xo_eval_value_missing (void)
     return value;
 }
 
+static inline xo_eval_value_t
+xo_eval_value_boolean_false (void)
+{
+    xo_eval_value_t value = XO_EVAL_VALUE_BOOLEAN_FALSE;
+    return value;
+}
+
+static inline xo_eval_value_t
+xo_eval_value_boolean_true (void)
+{
+    xo_eval_value_t value = XO_EVAL_VALUE_BOOLEAN_TRUE;
+    return value;
+}
+
 #if 0
 static inline xo_eval_value_t
 xo_eval_value_unsupported (void)
@@ -1183,7 +1208,7 @@ xo_eval_value_unsupported (void)
 
 /* Forward decl */
 static xo_eval_value_t
-xo_eval (xo_handle_t *xop, xo_filter_t *xfp, xo_match_t *xmp,
+xo_eval (xo_handle_t *xop, xo_filter_t *xfp, xo_tframe_t *framep,
 	 const char *pname, int indent,
 	 xo_xparse_node_id_t id, xo_eval_op_fn_t op_fn);
 
@@ -1240,6 +1265,17 @@ xo_eval_make_number_from_value (xo_handle_t *xop, xo_eval_value_t value)
 }
 
 static xo_eval_value_t
+xo_eval_position (XO_EVAL_NODE_ARGS)
+{
+    const char *str = xo_xparse_str(&xfp->xf_xd, xnp->xn_str);
+    uint64_t idx = str ? (uint64_t) strtoul(str, NULL, 10) : 0;
+    uint32_t pos = framep->xtf_position_cur;
+    xo_eval_value_t value = xo_eval_value_make(C_BOOLEAN, 0, 0);
+    value.xev_uint64 = (pos != 0 && pos == idx) ? 1 : 0;
+    return value;
+}
+
+static xo_eval_value_t
 xo_eval_number (XO_EVAL_NODE_ARGS)
 {
     const char *str = xo_xparse_str(&xfp->xf_xd, xnp->xn_str);
@@ -1267,7 +1303,7 @@ xo_eval_attribute (XO_EVAL_NODE_ARGS)
 {
     xo_eval_value_t value = { .xev_flags = 0 };
     const char *str = xo_xparse_str(&xfp->xf_xd, xnp->xn_str);
-    const char *aval = xo_filter_attr_find(xfp, xmp, str);
+    const char *aval = xo_filter_attr_find(xfp, framep, str);
     if (aval) {
 	value = xo_eval_value_make(C_STRING, 0, 0);
 	value.xev_str = aval;
@@ -1312,8 +1348,8 @@ xo_eval_path (XO_EVAL_NODE_ARGS)
 
     const char *str = xo_xparse_str(&xfp->xf_xd, elt->xn_str);
     const char *sval = is_attr
-	? xo_filter_attr_find(xfp, xmp, str)
-	: xo_filter_key_find(xfp, xmp, str);
+	? xo_filter_attr_find(xfp, framep, str)
+	: xo_filter_key_find(xfp, framep, str);
     if (sval) {
 	value = xo_eval_value_make(C_STRING, 0, 0);
 	value.xev_str = sval;
@@ -1777,6 +1813,20 @@ xo_eval_op_div (XO_EVAL_OP_ARGS)
 			       xo_eval_calc_div);
 }
 
+static xo_eval_value_t
+xo_eval_calc_mul (XO_EVAL_CALC_ARGS)
+{
+    left.xev_float *= right.xev_float;
+    return left;
+}
+
+static xo_eval_value_t
+xo_eval_op_mul (XO_EVAL_OP_ARGS)
+{
+    return xo_eval_calc(XO_EVAL_OP_PASS,
+			       xo_eval_calc_mul);
+}
+
 static xo_float_t
 xo_fmod (xo_float_t x, xo_float_t y)
 {
@@ -1809,7 +1859,7 @@ xo_eval_not (XO_EVAL_NODE_ARGS)
     xo_eval_value_t value;
 
     /* We only support a single element in the path, which must be a key */
-    value = xo_eval(xop, xfp, xmp, "arguments", indent,
+    value = xo_eval(xop, xfp, framep, "arguments", indent,
                        xnp->xn_contents, NULL);
     xo_eval_dump_value(xop, xfp, value, indent, "xo_eval_not");
 
@@ -1857,7 +1907,7 @@ xo_eval_arguments (XO_EVAL_NODE_ARGS,
 	if (XO_HAS_DEBUG(xop))
 	    xo_xparse_dump_node(&xfp->xf_xd, id, indent);
 
-	value = xo_eval(xop, xfp, xmp, "arguments", indent + XO_INDENT,
+	value = xo_eval(xop, xfp, framep, "arguments", indent + XO_INDENT,
 			id, NULL);
 	xo_eval_dump_value(xop, xfp, value, XO_INDENT,
 			   "xo_eval_argument: working");
@@ -1970,20 +2020,20 @@ xo_eval_func_normalize_space (XO_EVAL_NODE_ARGS)
     char *q = out;
 
     while (isspace((unsigned char) *p))	/* strip leading whitespace */
-	p++;
+	p += 1;
 
     while (*p) {
 	if (isspace((unsigned char) *p)) {
 	    *q++ = ' ';
 	    while (isspace((unsigned char) *p))
-		p++;
+		p += 1;
 	} else {
 	    *q++ = *p++;
 	}
     }
 
     if (q > out && q[-1] == ' ')	/* strip trailing whitespace */
-	q--;
+	q -= 1;
     *q = '\0';
 
     xo_free(str);
@@ -2068,7 +2118,7 @@ xo_eval_func_choose (XO_EVAL_NODE_ARGS)
     xo_xparse_node_id_t cond_id = xnp->xn_contents;
     xnp = xo_xparse_node(&xfp->xf_xd, cond_id);
 
-    xo_eval_value_t cond = xo_eval(xop, xfp, xmp, "choose-cond",
+    xo_eval_value_t cond = xo_eval(xop, xfp, framep, "choose-cond",
 				   indent + XO_INDENT, cond_id, NULL);
     if (cond.xev_flags & XEVF_MISSING) {
 	xo_eval_value_free(cond);
@@ -2084,7 +2134,7 @@ xo_eval_func_choose (XO_EVAL_NODE_ARGS)
     xo_xparse_node_id_t else_id = xnp->xn_next;
 
     xo_xparse_node_id_t branch_id = bool ? then_id : else_id;
-    return xo_eval(xop, xfp, xmp, bool ? "choose-then" : "choose-else",
+    return xo_eval(xop, xfp, framep, bool ? "choose-then" : "choose-else",
 		   indent + XO_INDENT, branch_id, NULL);
 }
 
@@ -2095,13 +2145,13 @@ xo_eval_func_choose2 (XO_EVAL_NODE_ARGS)
     xnp = xo_xparse_node(&xfp->xf_xd, first_id);
     xo_xparse_node_id_t second_id = xnp->xn_next;
 
-    xo_eval_value_t value = xo_eval(xop, xfp, xmp, "choose2-first",
+    xo_eval_value_t value = xo_eval(xop, xfp, framep, "choose2-first",
 				    indent + XO_INDENT, first_id, NULL);
     if (!(value.xev_flags & XEVF_MISSING) && xo_eval_cast_boolean(xop, value))
 	return value;
 
     xo_eval_value_free(value);
-    return xo_eval(xop, xfp, xmp, "choose2-second",
+    return xo_eval(xop, xfp, framep, "choose2-second",
 		   indent + XO_INDENT, second_id, NULL);
 }
 
@@ -2118,7 +2168,7 @@ xo_eval_func_concat (XO_EVAL_NODE_ARGS)
 	xnp = xo_xparse_node(&xfp->xf_xd, id);
 	count += 1;
 
-	xo_eval_value_t value = xo_eval(xop, xfp, xmp, "concat-arg",
+	xo_eval_value_t value = xo_eval(xop, xfp, framep, "concat-arg",
 					indent + XO_INDENT, id, NULL);
 	if (value.xev_flags & XEVF_MISSING) {
 	    xo_eval_value_free(value);
@@ -2203,7 +2253,7 @@ xo_eval_func_sum (XO_EVAL_NODE_ARGS)
     for (xo_xparse_node_id_t id = xnp->xn_contents; id; id = xnp->xn_next) {
 	xnp = xo_xparse_node(&xfp->xf_xd, id);
 
-	xo_eval_value_t value = xo_eval(xop, xfp, xmp, "sum-arg",
+	xo_eval_value_t value = xo_eval(xop, xfp, framep, "sum-arg",
 					indent + XO_INDENT, id, NULL);
 	if (value.xev_flags & XEVF_MISSING) {
 	    xo_eval_value_free(value);
@@ -2352,7 +2402,7 @@ xo_eval_function (XO_EVAL_NODE_ARGS)
 
     if (entry->xfm_flags & XEFF_NO_EVAL) {
 	/* Function manages its own argument evaluation */
-	value = entry->xfm_func(xop, xfp, xmp, xnp, indent, 0, NULL);
+	value = entry->xfm_func(xop, xfp, framep, xnp, indent, 0, NULL);
     } else {
 	/* Infra: allocate, evaluate all args, call, then free */
 	xo_eval_value_t *fn_argv = fn_argc
@@ -2363,7 +2413,7 @@ xo_eval_function (XO_EVAL_NODE_ARGS)
 	if (entry->xfm_nargs > 0) {
 	    for (int i = 0; i < fn_argc; i++) {
 		if (fn_argv[i].xev_flags & XEVF_MISSING) {
-		    xo_eval_arguments_free(xop, xfp, xmp, xnp, indent,
+		    xo_eval_arguments_free(xop, xfp, framep, xnp, indent,
 					   fn_argc, fn_argv);
 		    xo_free(fn_argv);
 		    return xo_eval_value_missing();
@@ -2371,9 +2421,10 @@ xo_eval_function (XO_EVAL_NODE_ARGS)
 	    }
 	}
 
-	value = entry->xfm_func(xop, xfp, xmp, xnp, indent, fn_argc, fn_argv);
+	value = entry->xfm_func(xop, xfp, framep, xnp, indent,
+				fn_argc, fn_argv);
 
-	xo_eval_arguments_free(xop, xfp, xmp, xnp, indent, fn_argc, fn_argv);
+	xo_eval_arguments_free(xop, xfp, framep, xnp, indent, fn_argc, fn_argv);
 	xo_free(fn_argv);
     }
 
@@ -2383,7 +2434,7 @@ xo_eval_function (XO_EVAL_NODE_ARGS)
 }
 
 static xo_eval_value_t
-xo_eval (xo_handle_t *xop, xo_filter_t *xfp, xo_match_t *xmp,
+xo_eval (xo_handle_t *xop, xo_filter_t *xfp, xo_tframe_t *framep,
 	 const char *pname, int indent,
 	 xo_xparse_node_id_t id, xo_eval_op_fn_t op_fn)
 {
@@ -2420,6 +2471,10 @@ xo_eval (xo_handle_t *xop, xo_filter_t *xfp, xo_match_t *xmp,
 
 	case K_DIV:
 	    nested_op_fn = xo_eval_op_div;
+	    break;
+
+	case L_STAR:
+	    nested_op_fn = xo_eval_op_mul;
 	    break;
 
 	case K_MOD:
@@ -2470,6 +2525,10 @@ xo_eval (xo_handle_t *xop, xo_filter_t *xfp, xo_match_t *xmp,
 	    node_fn = xo_eval_function;
 	    break;
 
+	case C_INDEX:
+	    node_fn = xo_eval_position;
+	    break;
+
 	case T_NUMBER:
 	    node_fn = xo_eval_number;
 	    break;
@@ -2480,7 +2539,7 @@ xo_eval (xo_handle_t *xop, xo_filter_t *xfp, xo_match_t *xmp,
 
 	case C_EXPR:
 	    if (xnp->xn_contents)
-		value = xo_eval(xop, xfp, xmp, pname, indent + XO_INDENT,
+		value = xo_eval(xop, xfp, framep, pname, indent + XO_INDENT,
 				xnp->xn_contents, NULL);
 	    break;
 
@@ -2494,15 +2553,15 @@ xo_eval (xo_handle_t *xop, xo_filter_t *xfp, xo_match_t *xmp,
 	     * individually
 	     */
 	    if (xnp->xn_contents)
-		value = xo_eval(xop, xfp, xmp, pname, indent + XO_INDENT,
+		value = xo_eval(xop, xfp, framep, pname, indent + XO_INDENT,
 				xnp->xn_contents, NULL);
 #endif
 	}
 
 	if (node_fn)
-	    value = node_fn(xop, xfp, xmp, xnp, indent + XO_INDENT, 0, NULL);
+	    value = node_fn(xop, xfp, framep, xnp, indent + XO_INDENT, 0, NULL);
 	else if (nested_op_fn)
-	    value = xo_eval(xop, xfp, xmp, cname, indent + XO_INDENT,
+	    value = xo_eval(xop, xfp, framep, cname, indent + XO_INDENT,
 			    xnp->xn_contents, nested_op_fn);
 
 	if (first) {
@@ -2521,7 +2580,7 @@ xo_eval (xo_handle_t *xop, xo_filter_t *xfp, xo_match_t *xmp,
 		value = xo_eval_value_missing();
 
 	    } else {
-		xo_eval_value_t result = op_fn(xop, xfp, xmp, xnp, pname,
+		xo_eval_value_t result = op_fn(xop, xfp, framep, xnp, pname,
 					       indent + XO_INDENT, last, value);
 		xo_eval_value_free(last);
 		xo_eval_value_free(value);
@@ -2567,17 +2626,17 @@ xo_eval (xo_handle_t *xop, xo_filter_t *xfp, xo_match_t *xmp,
  * "y"s can appear and the predicate is true if any "x" matches any "y".
  */
 static xo_eval_value_t
-xo_filter_pred_eval (xo_handle_t *xop, xo_filter_t *xfp, xo_match_t *xmp)
+xo_filter_pred_eval (xo_handle_t *xop, xo_filter_t *xfp,
+		     xo_tframe_t *framep, xo_xparse_node_id_t pred_id)
 {
-    xo_eval_value_t value = XO_EVAL_VALUE_ZERO;
+    int have_missing = FALSE;
 
-    xo_xparse_dump_one_node(&xfp->xf_xd, xmp->xm_stackp->xs_predicates,
-			    0, "eval: ");
+    xo_xparse_dump_one_node(&xfp->xf_xd, pred_id, 0, "eval: ");
 
     xo_xparse_node_id_t id;
     xo_xparse_node_t *xnp;
 
-    for (id = xmp->xm_stackp->xs_predicates; id; id = xnp->xn_next) {
+    for (id = pred_id; id; id = xnp->xn_next) {
 	xnp = xo_xparse_node(&xfp->xf_xd, id);
 
 	if (XO_HAS_DEBUG(xop))
@@ -2586,14 +2645,38 @@ xo_filter_pred_eval (xo_handle_t *xop, xo_filter_t *xfp, xo_match_t *xmp)
 	if (xnp->xn_type != C_PREDICATE) /* Can't eval anything else */
 	    continue;
 
-	value = xo_eval(xop, xfp, xmp, "top", XO_INDENT,
-			xnp->xn_contents, NULL);
-	xo_eval_dump_value(xop, xfp, value, XO_INDENT,
+	xo_eval_value_t pv = xo_eval(xop, xfp, framep, "top", XO_INDENT,
+				     xnp->xn_contents, NULL);
+	xo_eval_dump_value(xop, xfp, pv, XO_INDENT,
 			   "xo_filter_pred_eval: working");
+
+	if (pv.xev_flags & XEVF_MISSING) {
+	    /* Key not yet seen — can't resolve this predicate yet */
+	    have_missing = TRUE;
+	    xo_eval_value_free(pv);
+	    continue;
+	}
+
+	int passes = xo_eval_cast_boolean(xop, pv);
+	xo_eval_value_free(pv);
+
+	if (!passes) {
+	    /* Definitive FALSE: AND short-circuits regardless of other preds */
+	    xo_eval_dump_value(xop, xfp, xo_eval_value_boolean_false(),
+			       0, "xo_filter_pred_eval: final");
+	    return xo_eval_value_boolean_false();
+	}
     }
 
-    xo_eval_dump_value(xop, xfp, value, 0, "xo_filter_pred_eval: final");
-    return value;
+    if (have_missing) {
+	xo_eval_dump_value(xop, xfp, xo_eval_value_missing(),
+			   0, "xo_filter_pred_eval: final");
+	return xo_eval_value_missing();
+    }
+
+    xo_eval_dump_value(xop, xfp, xo_eval_value_boolean_true(),
+		       0, "xo_filter_pred_eval: final");
+    return xo_eval_value_boolean_true();
 }
 
 /*
@@ -2629,73 +2712,131 @@ xo_filter_pred_needs (xo_xparse_data_t *xdp, xo_filter_t *xfp,
 }
 
 /*
- * Evaluate a predicate against the keys buffered in `frame`.
- * Uses a stack-allocated xo_match_t adapter to reuse xo_filter_pred_eval.
- */
-static xo_eval_value_t
-xo_tmatch_eval_pred (xo_handle_t *xop, xo_filter_t *xfp,
-		     xo_tframe_t *frame, xo_xparse_node_id_t pred_id)
-{
-    xo_stack_t tmp_stack;
-    bzero(&tmp_stack, sizeof(tmp_stack));
-    tmp_stack.xs_keys = frame->xtf_keys;
-    tmp_stack.xs_keys_len = frame->xtf_keys_len;
-    tmp_stack.xs_attrs = frame->xtf_attrs;
-    tmp_stack.xs_attrs_len = frame->xtf_attrs_len;
-    tmp_stack.xs_predicates = pred_id;
-
-    xo_match_t tmp_match;
-    bzero(&tmp_match, sizeof(tmp_match));
-    tmp_match.xm_stackp = &tmp_stack;
-
-    return xo_filter_pred_eval(xop, xfp, &tmp_match);
-}
-
-/*
  * Eagerly evaluate a predicate at instance-open time with no keys yet.
  * Returns XTFS_LIVE, XTFS_DEAD, or XTFS_PRED (predicate needs key data).
  */
 static int
 xo_tmatch_try_eager (xo_handle_t *xop, xo_filter_t *xfp,
-		     xo_tframe_t *frame, xo_xparse_node_id_t pred,
-		     xo_tnode_t *tn, xo_tmatch_t *xm)
+		     xo_tframe_t *framep, xo_xparse_node_id_t pred,
+		     xo_tnode_t *tn, xo_tmatch_t *xtmp)
 {
-    xo_eval_value_t result = xo_tmatch_eval_pred(xop, xfp, frame, pred);
+    /*
+     * For foo[A][N] (trailing C_INDEX after leading predicates) we cannot
+     * evaluate the positional predicate eagerly because the qualified
+     * position (counting only instances where A passes) is not yet known.
+     * Defer to key-arrival or force-resolve time.
+     */
+    if (xo_pred_has_trailing_cindex(xfp, pred))
+	return XTFS_PRED;
+
+    xo_eval_value_t result = xo_filter_pred_eval(xop, xfp, framep, pred);
     if (result.xev_flags & XEVF_MISSING)
 	return XTFS_PRED;
     int live = xo_eval_cast_boolean(xop, result);
     xo_eval_value_free(result);
     if (live) {
-	xo_tmatch_record_live(xm, frame, tn);
+	xo_tmatch_record_live(xtmp, framep, tn);
 	return XTFS_LIVE;
     }
     return XTFS_DEAD;
 }
 
+/*
+ * Evaluate only the leading (non-C_INDEX) predicates in the list.
+ * Returns MISSING if any leading predicate still needs unseen keys,
+ * TRUE/FALSE otherwise.  C_INDEX predicates are skipped entirely.
+ */
+static xo_eval_value_t
+xo_filter_leading_preds_eval (xo_handle_t *xop, xo_filter_t *xfp,
+			      xo_tframe_t *framep, xo_xparse_node_id_t pred_id)
+{
+    xo_eval_value_t value = XO_EVAL_VALUE_BOOLEAN_TRUE;
+    xo_xparse_node_t *xnp;
+    for (xo_xparse_node_id_t id = pred_id; id; id = xnp->xn_next) {
+	xnp = xo_xparse_node(&xfp->xf_xd, id);
+	if (xnp->xn_type != C_PREDICATE)
+	    continue;
+	xo_xparse_node_id_t cid = xnp->xn_contents;
+	if (cid && xo_xparse_node(&xfp->xf_xd, cid)->xn_type == C_INDEX)
+	    continue;  /* skip positional predicates */
+	value = xo_eval(xop, xfp, framep, "lead-pred", XO_INDENT, cid, NULL);
+	if (value.xev_flags & XEVF_MISSING)
+	    return value;
+    }
+    return value;
+}
+
+/*
+ * Determine the position to use for C_INDEX evaluation for slot `slot` in
+ * `framep`.  If the predicate list has a trailing C_INDEX (i.e. leading
+ * key/test predicates precede it), we maintain a separate "qualified"
+ * counter in the parent frame that only advances when those leading
+ * predicates pass.  Otherwise we fall back to the at-open-time position.
+ */
+static uint32_t
+xo_tmatch_slot_position (xo_handle_t *xop, xo_filter_t *xfp,
+			  xo_tmatch_t *xtmp, xo_tframe_t *framep,
+			  uint32_t slot, xo_xparse_node_id_t pred_id)
+{
+    /* Already counted for this slot: return saved qualified position */
+    if (framep->xtf_flags[slot] & XTFF_QUAL_COUNTED)
+	return framep->xtf_qual_position[slot];
+
+    /* No trailing C_INDEX → use normal open-time position */
+    if (!xo_pred_has_trailing_cindex(xfp, pred_id))
+	return framep->xtf_position[slot];
+
+    /* Evaluate leading predicates to see if they currently pass */
+    xo_eval_value_t lv = xo_filter_leading_preds_eval(xop, xfp, framep, pred_id);
+    if (lv.xev_flags & XEVF_MISSING) {
+	xo_eval_value_free(lv);
+	return framep->xtf_position[slot]; /* not yet decidable */
+    }
+    int passes = xo_eval_cast_boolean(xop, lv);
+    xo_eval_value_free(lv);
+
+    if (!passes)
+	return framep->xtf_position[slot]; /* C_INDEX outcome won't matter */
+
+    /* Leading predicates passed: advance the qualified counter in parent frame */
+    xo_tframe_t *parentp = xtmp->xtm_depth > 0
+	? &xtmp->xtm_stack[xtmp->xtm_depth - 1] : NULL;
+    if (parentp == NULL)
+	return framep->xtf_position[slot];
+
+    uint32_t qpos = xo_tframe_child_qualified_position(parentp, framep->xtf_node[slot]);
+    framep->xtf_qual_position[slot] = qpos;
+    framep->xtf_flags[slot] |= XTFF_QUAL_COUNTED;
+    return qpos;
+}
+
 static xo_filter_status_t
-xo_tmatch_key (xo_handle_t *xop, xo_filter_t *xfp, xo_tmatch_t *xm,
+xo_tmatch_key (xo_handle_t *xop, xo_filter_t *xfp, xo_tmatch_t *xtmp,
 	       const char *tag, xo_ssize_t tlen,
 	       const char *value, xo_ssize_t vlen)
 {
-    if (xm->xm_depth == 0)
+    if (xtmp->xtm_depth == 0)
 	return xfp->xf_status;
 
-    xo_trie_t *xtp = xm->xm_trie;
-    xo_tframe_t *frame = &xm->xm_stack[xm->xm_depth];
+    xo_trie_t *xtp = xtmp->xtm_trie;
+    xo_tframe_t *framep = &xtmp->xtm_stack[xtmp->xtm_depth];
 
-    for (uint32_t i = 0; i < frame->xtf_count; i++) {
-	if (frame->xtf_state[i] != XTFS_PRED)
+    for (uint32_t i = 0; i < framep->xtf_count; i++) {
+	if (framep->xtf_state[i] != XTFS_PRED)
 	    continue;
 
-	xo_tnode_t *tn = &xtp->xt_nodes[frame->xtf_node[i]];
+	xo_tnode_t *tn = &xtp->xt_nodes[framep->xtf_node[i]];
 
 	if (!xo_filter_pred_needs(&xfp->xf_xd, xfp, tn->xtn_pred, tag, tlen, FALSE))
 	    continue;
 
-	xo_tframe_key_add(frame, tag, tlen, value, vlen);
+	xo_tframe_key_add(framep, tag, tlen, value, vlen);
 
+	framep->xtf_position_cur = xo_tmatch_slot_position(xop, xfp, xtmp,
+							    framep, i,
+							    tn->xtn_pred);
 	xo_eval_value_t result =
-	    xo_tmatch_eval_pred(xop, xfp, frame, tn->xtn_pred);
+	    xo_filter_pred_eval(xop, xfp, framep, tn->xtn_pred);
 
 	if (result.xev_flags & XEVF_MISSING)
 	    continue;
@@ -2703,10 +2844,10 @@ xo_tmatch_key (xo_handle_t *xop, xo_filter_t *xfp, xo_tmatch_t *xm,
 	int live = xo_eval_cast_boolean(xop, result);
 	xo_eval_value_free(result);
 	if (live) {
-	    frame->xtf_state[i] = XTFS_LIVE;
-	    xo_tmatch_record_live(xm, frame, tn);
+	    framep->xtf_state[i] = XTFS_LIVE;
+	    xo_tmatch_record_live(xtmp, framep, tn);
 	} else {
-	    frame->xtf_state[i] = XTFS_DEAD;
+	    framep->xtf_state[i] = XTFS_DEAD;
 	}
     }
 
@@ -2728,36 +2869,39 @@ xo_filter_op_key (XO_FILTER_KEY_SIGNATURE)
 
     XO_DBG(xop, "xo_filter_key: '%.*s' = '%.*s' --> status %s",
 	   tlen, tag, vlen, value,
-	   xo_filter_op_status_name(xfp->xf_status));
+	   xo_filt_status_name(xfp->xf_status));
 
     return rc;
 }
 
 static xo_filter_status_t
-xo_tmatch_attr (xo_handle_t *xop, xo_filter_t *xfp, xo_tmatch_t *xm,
+xo_tmatch_attr (xo_handle_t *xop, xo_filter_t *xfp, xo_tmatch_t *xtmp,
 		const char *tag, xo_ssize_t tlen,
 		const char *value, xo_ssize_t vlen)
 {
-    if (xm->xm_depth == 0)
+    if (xtmp->xtm_depth == 0)
 	return xfp->xf_status;
 
-    xo_trie_t *xtp = xm->xm_trie;
-    xo_tframe_t *frame = &xm->xm_stack[xm->xm_depth];
+    xo_trie_t *xtp = xtmp->xtm_trie;
+    xo_tframe_t *framep = &xtmp->xtm_stack[xtmp->xtm_depth];
 
-    for (uint32_t i = 0; i < frame->xtf_count; i++) {
-	if (frame->xtf_state[i] != XTFS_PRED)
+    for (uint32_t i = 0; i < framep->xtf_count; i++) {
+	if (framep->xtf_state[i] != XTFS_PRED)
 	    continue;
 
-	xo_tnode_t *tn = &xtp->xt_nodes[frame->xtf_node[i]];
+	xo_tnode_t *tn = &xtp->xt_nodes[framep->xtf_node[i]];
 
 	if (!xo_filter_pred_needs(&xfp->xf_xd, xfp, tn->xtn_pred,
 				  tag, tlen, TRUE))
 	    continue;
 
-	xo_tframe_attr_add(frame, tag, tlen, value, vlen);
+	xo_tframe_attr_add(framep, tag, tlen, value, vlen);
 
+	framep->xtf_position_cur = xo_tmatch_slot_position(xop, xfp, xtmp,
+							    framep, i,
+							    tn->xtn_pred);
 	xo_eval_value_t result =
-	    xo_tmatch_eval_pred(xop, xfp, frame, tn->xtn_pred);
+	    xo_filter_pred_eval(xop, xfp, framep, tn->xtn_pred);
 
 	if (result.xev_flags & XEVF_MISSING)
 	    continue;
@@ -2765,10 +2909,10 @@ xo_tmatch_attr (xo_handle_t *xop, xo_filter_t *xfp, xo_tmatch_t *xm,
 	int live = xo_eval_cast_boolean(xop, result);
 	xo_eval_value_free(result);
 	if (live) {
-	    frame->xtf_state[i] = XTFS_LIVE;
-	    xo_tmatch_record_live(xm, frame, tn);
+	    framep->xtf_state[i] = XTFS_LIVE;
+	    xo_tmatch_record_live(xtmp, framep, tn);
 	} else {
-	    frame->xtf_state[i] = XTFS_DEAD;
+	    framep->xtf_state[i] = XTFS_DEAD;
 	}
     }
 
@@ -2792,7 +2936,7 @@ xo_filter_op_attribute (xo_handle_t *xop, xo_filter_t *xfp,
 
     XO_DBG(xop, "xo_filter_attribute: '@%.*s' = '%.*s' --> status %s",
 	   tlen, tag, vlen, value,
-	   xo_filter_op_status_name(xfp->xf_status));
+	   xo_filt_status_name(xfp->xf_status));
 
     return rc;
 }
@@ -2813,7 +2957,7 @@ xo_filter_op_passthru (XO_ENCODER_HANDLER_ARGS,
     XO_DBG(xop, "filter: entering passthru: %s: '%s'%s status: %s/%d",
 	   xo_encoder_op_name(op), name ?: "",
 	   (flags & XFF_KEY) ? " is-a-key" : "",
-	   xo_filter_status_name(xfp->xf_status), xfp->xf_status);
+	   xo_filt_status_name(xfp->xf_status), xfp->xf_status);
 
     switch (op) {
     case XO_OP_OPEN_CONTAINER:
@@ -2846,7 +2990,7 @@ xo_filter_op_passthru (XO_ENCODER_HANDLER_ARGS,
     XO_DBG(xop, "filter: leaving passthru: %s: '%s'%s status: %s/%d",
 	   xo_encoder_op_name(op), name ?: "",
 	   (flags & XFF_KEY) ? " is-a-key" : "",
-	   xo_filter_status_name(xfp->xf_status), xfp->xf_status);
+	   xo_filt_status_name(xfp->xf_status), xfp->xf_status);
 
     return rc;
 }
@@ -2865,17 +3009,17 @@ xo_filter_op_needs_nonkey_field (XO_FILTER_NEEDS_NONKEY_FIELD_SIGNATURE)
     if (xfp->xf_status != XO_STATUS_TRACK)
 	return FALSE;
 
-    xo_tmatch_t *xm = &xfp->xf_tmatch;
-    if (xm->xm_depth == 0)
+    xo_tmatch_t *xtmp = &xfp->xf_tmatch;
+    if (xtmp->xtm_depth == 0)
 	return FALSE;
 
-    xo_trie_t *xtp = xm->xm_trie;
-    xo_tframe_t *frame = &xm->xm_stack[xm->xm_depth];
+    xo_trie_t *xtp = xtmp->xtm_trie;
+    xo_tframe_t *framep = &xtmp->xtm_stack[xtmp->xtm_depth];
 
-    for (uint32_t i = 0; i < frame->xtf_count; i++) {
-	if (frame->xtf_state[i] != XTFS_PRED)
+    for (uint32_t i = 0; i < framep->xtf_count; i++) {
+	if (framep->xtf_state[i] != XTFS_PRED)
 	    continue;
-	xo_tnode_t *tn = &xtp->xt_nodes[frame->xtf_node[i]];
+	xo_tnode_t *tn = &xtp->xt_nodes[framep->xtf_node[i]];
 	if (xo_filter_pred_needs(&xfp->xf_xd, xfp, tn->xtn_pred, tag, tlen, FALSE))
 	    return TRUE;
     }
@@ -2893,32 +3037,34 @@ static void
 xo_filter_force_resolve_pred (xo_handle_t *xop, xo_filter_t *xfp,
 			      const char *tag)
 {
-    xo_tmatch_t *xm = &xfp->xf_tmatch;
-    if (xm->xm_depth == 0)
+    xo_tmatch_t *xtmp = &xfp->xf_tmatch;
+    if (xtmp->xtm_depth == 0)
 	return;
 
-    xo_tframe_t *frame = &xm->xm_stack[xm->xm_depth];
+    xo_tframe_t *framep = &xtmp->xtm_stack[xtmp->xtm_depth];
     xfp->xf_flags |= XFSF_FORCE_RESOLVE;
 
-    for (uint32_t i = 0; i < frame->xtf_count; i++) {
-	if (frame->xtf_state[i] != XTFS_PRED)
+    for (uint32_t i = 0; i < framep->xtf_count; i++) {
+	if (framep->xtf_state[i] != XTFS_PRED)
 	    continue;
-	xo_tnode_t *tn = &xm->xm_trie->xt_nodes[frame->xtf_node[i]];
+	xo_tnode_t *tn = &xtmp->xtm_trie->xt_nodes[framep->xtf_node[i]];
 	if (tn->xtn_pred == 0) {
-	    frame->xtf_state[i] = XTFS_LIVE;
-	    xo_tmatch_record_live(xm, frame, tn);
+	    framep->xtf_state[i] = XTFS_LIVE;
+	    xo_tmatch_record_live(xtmp, framep, tn);
 	    continue;
 	}
+	framep->xtf_position_cur = (framep->xtf_flags[i] & XTFF_QUAL_COUNTED)
+	    ? framep->xtf_qual_position[i] : framep->xtf_position[i];
 	xo_eval_value_t result =
-	    xo_tmatch_eval_pred(xop, xfp, frame, tn->xtn_pred);
+	    xo_filter_pred_eval(xop, xfp, framep, tn->xtn_pred);
 	if (!(result.xev_flags & XEVF_MISSING)) {
 	    int live = xo_eval_cast_boolean(xop, result);
 	    xo_eval_value_free(result);
 	    if (live) {
-		frame->xtf_state[i] = XTFS_LIVE;
-		xo_tmatch_record_live(xm, frame, tn);
+		framep->xtf_state[i] = XTFS_LIVE;
+		xo_tmatch_record_live(xtmp, framep, tn);
 	    } else {
-		frame->xtf_state[i] = XTFS_DEAD;
+		framep->xtf_state[i] = XTFS_DEAD;
 	    }
 	}
     }

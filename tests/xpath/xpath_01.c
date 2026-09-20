@@ -26,6 +26,8 @@
 #include "xo_filter.h"
 
 static int opt_debug;
+static int opt_case;
+static int opt_skip;
 static int opt_quiet;
 static const char *opt_filter;
 
@@ -76,9 +78,13 @@ do_add_filter (xo_handle_t *xop, xo_xparse_data_t *xdp, const char *filter)
     if (opt_debug)
 	xo_set_flags(xop, XOF_DEBUG);
 
-    fprintf(stderr, "adding filter: '%s'\n", filter);
+    if (!opt_quiet)
+	fprintf(stderr, "adding filter: '%s'\n", filter);
+
     int rc = xo_add_filter(xop, filter);
-    fprintf(stderr, "added filter: %d\n", rc);
+
+    if (!opt_quiet)
+	fprintf(stderr, "added filter: %d\n", rc);
 
     /*
      * We really _should_ fail here, but it's really wonderful
@@ -95,7 +101,7 @@ do_add_filter (xo_handle_t *xop, xo_xparse_data_t *xdp, const char *filter)
 	xo_xparse_dump(xdp);
     }
 
-    if (opt_debug || !xof_debug)
+    if (!opt_debug && !xof_debug)
 	xo_clear_flags(xop, XOF_DEBUG);
 
     return rc;
@@ -108,6 +114,7 @@ do_work (xo_handle_t *xop, xo_filter_t *xfp, xo_xparse_data_t *xdp, FILE *in)
     char *field, *value;
     int rc;
     int done = FALSE;
+    int this_case = 1;
 
     for (rc = 0; !done; rc = 0) {
 	cp = fgets(buf, sizeof(buf), in);
@@ -115,6 +122,16 @@ do_work (xo_handle_t *xop, xo_filter_t *xfp, xo_xparse_data_t *xdp, FILE *in)
 	    break;
 
 	cp = trim(cp);
+
+	if (*cp == 'r') {
+	    if (opt_skip)
+		opt_skip -= 1;
+	    this_case += 1;
+	}
+
+	if ((opt_case && opt_case != this_case) || opt_skip)
+	    continue;		/* Skip on skipping on */
+	    
 	if (!opt_quiet)
 	    fprintf(stderr, "main: input '%s'\n", cp ?: "");
 
@@ -166,7 +183,7 @@ do_work (xo_handle_t *xop, xo_filter_t *xfp, xo_xparse_data_t *xdp, FILE *in)
 	    if (!opt_quiet)
 		fprintf(stderr, "main: field: '%s'='%s'\n", field, value);
 
-	    rc = xo_emit_field_h(xop, "", field, "%s", value);
+	    rc = xo_emit_field_h(xop, "", field, "%s", NULL, value);
 	    break;
 
 	case '=':		/* Non-key field */
@@ -178,7 +195,7 @@ do_work (xo_handle_t *xop, xo_filter_t *xfp, xo_xparse_data_t *xdp, FILE *in)
 	    if (!opt_quiet)
 		fprintf(stderr, "main: field: '%s'='%s'\n", field, value);
 
-	    rc = xo_emit_field_h(xop, "", field, "%s", value);
+	    rc = xo_emit_field_h(xop, "", field, "%s", NULL, value);
 	    break;
 
 	case '$':
@@ -190,7 +207,7 @@ do_work (xo_handle_t *xop, xo_filter_t *xfp, xo_xparse_data_t *xdp, FILE *in)
 	    if (!opt_quiet)
 		fprintf(stderr, "main: key: '%s'='%s'\n", field, value);
 
-	    rc = xo_emit_field_h(xop, "k", field, "%s", value);
+	    rc = xo_emit_field_h(xop, "k", field, "%s", NULL, value);
 	    break;
 
 	case '@':
@@ -261,9 +278,18 @@ do_work (xo_handle_t *xop, xo_filter_t *xfp, xo_xparse_data_t *xdp, FILE *in)
 
 	if (!opt_quiet)
 	    fprintf(stderr, "main: status: %s\n",
-		    xo_filter_status_name(xo_filter_get_status(xop, xfp)));
+		    xo_filt_status_name(xo_filter_get_status(xop, xfp)));
 
     }
+}
+
+static inline const char *
+get_arg (const char *arg, const char *msg)
+{
+    if (arg == NULL)
+	xo_errx(1, "missing arg: %s", msg);
+
+    return arg;
 }
 
 int
@@ -280,9 +306,13 @@ main (int argc, char **argv)
 	if (xo_streq(argv[i], "debug"))
 	    opt_debug = 1;
 	else if (xo_streq(argv[i], "filter"))
-	    opt_filter = argv[++i];
+	    opt_filter = get_arg(argv[++i], "filter name");
 	else if (xo_streq(argv[i], "input"))
-	    opt_input = argv[++i];
+	    opt_input = get_arg(argv[++i], "input file");
+	else if (xo_streq(argv[i], "case")) /* Execute only the nth case */
+	    opt_case = atoi(get_arg(argv[++i], "case number"));
+	else if (xo_streq(argv[i], "skip")) /* Skip the first n cases */
+	    opt_case = atoi(get_arg(argv[++i], "skip count"));
 	else if (xo_streq(argv[i], "quiet"))
 	    opt_quiet = 1;
 	else if (xo_streq(argv[i], "yydebug"))
@@ -317,7 +347,6 @@ main (int argc, char **argv)
     do_work(xop, xfp, xdp, in);
 
     xo_finish_h(xop);
-    xo_xparse_clean(xdp);
 
     return 0;
 }

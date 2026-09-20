@@ -141,6 +141,7 @@
  * Use a "%pure-parser" for reentracy
 %define api.pure full
  */
+%token-table
 %pure-parser
 
 %{
@@ -462,7 +463,9 @@ xp_or_expr :
 
 xp_and_expr :
 	xp_equality_expr
-		{ $$ = xo_xparse_yyval(xparse_data, $1); }
+		{
+		    $$ = xo_xparse_yyval(xparse_data, $1);
+		}
 
 	| xp_and_expr and_operator xp_equality_expr
 		{
