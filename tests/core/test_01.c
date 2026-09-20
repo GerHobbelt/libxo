@@ -348,6 +348,9 @@ main (int argc, char **argv)
     xo_emit("{F:both text/see %s}\n");
     xo_emit("X{F:}X\n", "empty");
 
+    char *nil = NULL;
+    xo_emit("nil: [{:ptr}], nil-as-empty: [{:ptr2/%JNs}]\n", nil, nil);
+
     if (opt_top_count && --opt_top_count > 0)
 	goto top;
 
