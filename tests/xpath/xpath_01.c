@@ -97,7 +97,7 @@ main (int argc, char **argv)
 	xo_errx(1, "allocation of filter failed");
 
     xo_handle_t *xop = NULL;	/* Use default output handle */
-    xo_filter_data_set(xop, xfp);
+    xo_set_filter_data(xop, xfp);
     xo_xparse_data_t *xdp = xo_filter_xparse_data(xop, xfp);
 
     xo_xparse_init(xdp);
@@ -109,8 +109,9 @@ main (int argc, char **argv)
     char *cp, buf[BUFSIZ];
     char *field, *value;
     int rc;
+    int done = FALSE;
 
-    for (rc = 0;; rc = 0) {
+    for (rc = 0; !done; rc = 0) {
 	cp = fgets(buf, sizeof(buf), in);
 	if (cp == NULL)
 	    break;
@@ -169,7 +170,7 @@ main (int argc, char **argv)
 	    break;
 
 	case '=':		/* Non-key field */
-	    field = cp + 1;
+	    field = trim(cp + 1);
 	    value = clean_token(field);
 	    if (!*field || !*value)
 		break;
@@ -179,7 +180,7 @@ main (int argc, char **argv)
 	    break;
 
 	case '$':
-	    field = cp + 1;
+	    field = trim(cp + 1);
 	    value = clean_token(field);
 	    if (!*field || !*value)
 		break;
@@ -197,12 +198,16 @@ main (int argc, char **argv)
 	    if (xfp == NULL)
 		xo_errx(1, "allocation of filter failed");
 
-	    xo_filter_data_set(xop, xfp);
+	    xo_set_filter_data(xop, xfp);
 	    xdp = xo_filter_xparse_data(xop, xfp);
 
 	    xo_xparse_init(xdp);
 
 	    rc = 0;
+	    break;
+
+	case 'q':
+	    done = TRUE;
 	    break;
 
 	default:

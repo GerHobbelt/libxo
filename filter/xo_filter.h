@@ -28,9 +28,11 @@ typedef struct xo_filter_s xo_filter_t;
 typedef uint32_t xo_filter_status_t;
 
 /* Value for xo_filter_status_t */
+#define XO_STATUS_ZERO	0	/* not on/working/loaded/enabled */
 #define XO_STATUS_FULL	1	/* Fully open: let's make some output */
 #define XO_STATUS_TRACK	2	/* Track open/close/key paths, but no data */
-#define XO_STATUS_DEAD	3	/* Nope, it's dead under this hierarchy */
+#define XO_STATUS_PRED	3	/* Looking for a predicate */
+#define XO_STATUS_DEAD	4	/* Nope, it's dead under this hierarchy */
 
 #define XO_FILTER_DEFAULT_ARGS xop, xfp
 #define XO_FILTER_DEFAULT_SIGNATURE \
@@ -44,10 +46,10 @@ typedef uint32_t xo_filter_status_t;
 #include "xo_filter_ops.h"
 
 void
-xo_filter_data_set (xo_handle_t *xop UNUSED, xo_filter_t *);
+xo_set_filter_data (xo_handle_t *xop UNUSED, xo_filter_t *);
 
 struct xo_filter_s *
-xo_filter_data_get (xo_handle_t *xop, int create);
+xo_get_filter_data (xo_handle_t *xop, int create);
 
 xo_filter_t *
 xo_filter_create (xo_handle_t *xop);
