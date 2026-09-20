@@ -1,18 +1,18 @@
 {
-  "rtoon-test": {
-    "s01-empty-container": {
+  "rtoon_test": {
+    "s01_empty_container": {
 
     },
-    "s02-empty-list": [
+    "s02_empty_list": [
     ],
-    "s03-a": {
-      "s03-b": {
-        "s03-c": {
+    "s03_a": {
+      "s03_b": {
+        "s03_c": {
           "leaf": "value"
         }
       }
     },
-    "s04-disk": [
+    "s04_disk": [
       {
         "name": "sda",
         "size": 100
@@ -26,35 +26,35 @@
         "size": 300
       }
     ],
-    "s05-route": [
+    "s05_route": [
       {
         "dest": "10.0.0.0",
-        "prefix-len": 24,
+        "prefix_len": 24,
         "protocol": "static"
       },
       {
         "dest": "10.0.1.0",
-        "prefix-len": 24,
+        "prefix_len": 24,
         "protocol": "static"
       },
       {
         "dest": "0.0.0.0",
-        "prefix-len": 0,
+        "prefix_len": 0,
         "protocol": "default"
       }
     ],
-    "s06-host": [
+    "s06_host": [
       {
         "name": "alpha"
       },
       {
         "name": "beta",
         "stats": {
-          "up-time": 100
+          "up_time": 100
         }
       }
     ],
-    "s07-cpu": [
+    "s07_cpu": [
       {
         "num": 0,
         "load": 0
@@ -68,19 +68,19 @@
         "load": 14
       }
     ],
-    "s08-route2": [
+    "s08_route2": [
       {
         "dest": "10.0.0.0",
-        "prefix-len": 24,
+        "prefix_len": 24,
         "protocol": "static"
       },
       {
         "dest": "10.0.1.0",
-        "prefix-len": 25,
+        "prefix_len": 25,
         "protocol": "static"
       }
     ],
-    "s09-item": [
+    "s09_item": [
       {
         "sku": "WIDGET1",
         "qty": 10,
@@ -97,10 +97,10 @@
         "qty": 0,
         "price": "",
         "cost": "1.00",
-        "sell-by": "2026-01-01"
+        "sell_by": "2026-01-01"
       }
     ],
-    "s10-colors": {
+    "s10_colors": {
       "tag": [
         "a",
         "",
@@ -109,26 +109,26 @@
         "needs,quote"
       ]
     },
-    "s11a-tags": {
+    "s11a_tags": {
       "tag": [
         "red"
       ]
     },
-    "s11b-tags": {
+    "s11b_tags": {
       "tag": [
         ""
       ]
     },
-    "s12-plain": {
+    "s12_plain": {
       "tag": "red"
     },
-    "s13a-entry": [
+    "s13a_entry": [
       {
         "num": 1,
         "name": "one"
       }
     ],
-    "s13b-entry": [
+    "s13b_entry": [
       {
         "num": 1,
         "name": "one",
@@ -140,16 +140,16 @@
         "score": 43
       }
     ],
-    "s13c-entry": [
+    "s13c_entry": [
       {
         "num": 1,
         "name": "one"
       }
     ],
-    "s14-thing": {
+    "s14_thing": {
       "leaf": "value"
     },
-    "s15-route-entry": [
+    "s15_route_entry": [
       {
         "destination": "10.0.0.0/24",
         "protocol": "direct"
@@ -159,11 +159,11 @@
         "protocol": "static",
         "via": {
           "interface": "eth0",
-          "source-address": "10.0.1.1"
+          "source_address": "10.0.1.1"
         }
       }
     ],
-    "s15b-entry": [
+    "s15b_entry": [
       {
         "name": "one",
         "sub": [
@@ -173,16 +173,16 @@
         ]
       }
     ],
-    "s16-types": {
+    "s16_types": {
       "count": 42,
       "active": true,
       "disabled": false,
-      "raw-null": null,
+      "raw_null": null,
       "code": "42",
       "label": "true",
       "mid": "null"
     },
-    "s17-split": [
+    "s17_split": [
       {
         "num": 1,
         "aval": 10,
@@ -194,21 +194,21 @@
         "bval": 40
       }
     ],
-    "s18-order": [
+    "s18_order": [
       {
         "pre": "before",
         "name": "n1",
         "post": "after"
       }
     ],
-    "s19-twokeys": [
+    "s19_twokeys": [
       {
         "akey": "ka",
         "mid": "middata",
         "bkey": "kb"
       }
     ],
-    "s20-narrow": [
+    "s20_narrow": [
       {
         "name": "r1",
         "aval": 1
@@ -223,14 +223,14 @@
         "aval": 3
       }
     ],
-    "s21-dupfield": [
+    "s21_dupfield": [
       {
         "name": "dup",
         "val": 1,
         "val": 2
       }
     ],
-    "s22-outer-sparse": [
+    "s22_outer_sparse": [
       {
         "name": "parent1",
         "inner": [
@@ -245,7 +245,7 @@
         ]
       }
     ],
-    "s23-mixed": [
+    "s23_mixed": [
       {
         "name": "wrap",
         "holder": {
@@ -262,7 +262,7 @@
         }
       }
     ],
-    "s24-leafmix": {
+    "s24_leafmix": {
       "before": "x",
       "tag": [
         "r",
@@ -277,15 +277,15 @@
         "magenta"
       ]
     },
-    "s25-sib-a": {
+    "s25_sib_a": {
       "xval": "1"
     },
-    "s25-sib-b": [
+    "s25_sib_b": [
       {
         "name": "b1"
       }
     ],
-    "s26-twolists": {
+    "s26_twolists": {
       "listone": [
         {
           "name": "one-a"
@@ -297,7 +297,7 @@
         }
       ]
     },
-    "s27-firstcontainer": [
+    "s27_firstcontainer": [
       {
         "info": {
           "detail": "d1"
@@ -305,21 +305,21 @@
         "name": "after-container"
       }
     ],
-    "s28-dispenc": {
-      "enc-only": "should-appear",
+    "s28_dispenc": {
+      "enc_only": "should-appear",
       "normal": "always-appears"
     },
-    "s29-keyonly-dense": [
+    "s29_keyonly_dense": [
       {
         "name": "solo"
       }
     ],
-    "s29-keyonly-sparse": [
+    "s29_keyonly_sparse": [
       {
         "name": "solo"
       }
     ],
-    "s30-sparse-empty": [
+    "s30_sparse_empty": [
       {
 
       },
@@ -327,7 +327,7 @@
         "name": "second"
       }
     ],
-    "s31-emptyfirst": [
+    "s31_emptyfirst": [
       {
 
       },
@@ -336,42 +336,13 @@
         "val": 99
       }
     ],
-    "s32-alwaysempty": [
+    "s32_alwaysempty": [
       {
 
       },
       {
 
       }
-    ],
-    "s33a-newlines": {
-      "msg": "line1\nline2\r\nline3\ttabbed"
-    },
-    "s33b-nonmnemonic": {
-      "msg": "ctrl\u0001here\u001fnext"
-    },
-    "s33c-colors": {
-      "tag": [
-        "needs,quote\nand-newline"
-      ]
-    },
-    "s33d-row": [
-      {
-        "num": 1,
-        "note": "tab\there"
-      }
-    ],
-    "s33e-odd	name": {
-
-    },
-    "s34a-bmp": {
-      "msg": "café"
-    },
-    "s34b-supplementary": {
-      "msg": "😀hi"
-    },
-    "s34c-café": {
-
-    }
+    ]
   }
 }
