@@ -357,34 +357,6 @@ struct xo_handle_s {
     xo_xsf_flags_t xo_rb_snap;	/* Transient: parent XSF_RB_BITS before open */
 };
 
-/* Flag operations */
-#define XOF_BIT_ISSET(_flag, _bit)	(((_flag) & (_bit)) ? 1 : 0)
-#define XOF_BIT_SET(_flag, _bit)	do { (_flag) |= (_bit); } while (0)
-#define XOF_BIT_CLEAR(_flag, _bit)	do { (_flag) &= ~(_bit); } while (0)
-
-#define XOF_ISSET(_xop, _bit) XOF_BIT_ISSET(_xop->xo_flags, _bit)
-#define XOF_SET(_xop, _bit) XOF_BIT_SET(_xop->xo_flags, _bit)
-#define XOF_CLEAR(_xop, _bit) XOF_BIT_CLEAR(_xop->xo_flags, _bit)
-
-#define XOIF_ISSET(_xop, _bit) XOF_BIT_ISSET(_xop->xo_iflags, _bit)
-#define XOIF_SET(_xop, _bit) XOF_BIT_SET(_xop->xo_iflags, _bit)
-#define XOIF_CLEAR(_xop, _bit) XOF_BIT_CLEAR(_xop->xo_iflags, _bit)
-
-/* Internal flags */
-#define XOIF_REORDER	XOF_BIT(0) /* Reordering fields; record field info */
-#define XOIF_DIV_OPEN	XOF_BIT(1) /* A <div> is open */
-#define XOIF_TOP_EMITTED XOF_BIT(2) /* The top JSON braces have been emitted */
-#define XOIF_ANCHOR	XOF_BIT(3) /* An anchor is in place  */
-
-#define XOIF_UNITS_PENDING XOF_BIT(4) /* We have a units-insertion pending */
-#define XOIF_INIT_IN_PROGRESS XOF_BIT(5) /* Init of handle is in progress */
-#define XOIF_MADE_OUTPUT XOF_BIT(6)	 /* Have already made output */
-#ifdef LIBXO_NEED_FILTERS
-#define XOIF_FILTERING	XOF_BIT(7)	 /* Actively filtering (XOF_FILTER) */
-#else  /* LIBXO_NEED_FILTERS */
-#define XOIF_FILTERING 0	/* Allow the compiler to trim filter code */
-#endif /* LIBXO_NEED_FILTERS */
-
 /*
  * Normal printf has width and precision, which for strings operate as
  * min and max number of columns.  But this depends on the idea that
@@ -432,22 +404,52 @@ struct xo_handle_s {
  * A place to parse printf-style format flags for each field
  */
 typedef struct xo_format_s {
-    unsigned char xf_fc;	/* Format character */
-    unsigned char xf_enc;	/* Encoding of the string (XF_ENC_*) */
-    unsigned char xf_skip;	/* Skip this field */
-    unsigned char xf_lflag;	/* 'l' (long) */
-    unsigned char xf_hflag;;	/* 'h' (half) */
-    unsigned char xf_jflag;	/* 'j' (intmax_t) */
-    unsigned char xf_tflag;	/* 't' (ptrdiff_t) */
-    unsigned char xf_zflag;	/* 'z' (size_t) */
-    unsigned char xf_qflag;	/* 'q' (quad_t) */
-    unsigned char xf_seen_minus; /* Seen a minus */
-    int xf_leading_zero;	/* Seen a leading zero (zero fill)  */
-    unsigned xf_dots;		/* Seen one or more '.'s */
     int xf_width[XF_WIDTH_NUM]; /* Width/precision/size numeric fields */
-    unsigned xf_stars;		/* Seen one or more '*'s */
-    unsigned char xf_star[XF_WIDTH_NUM]; /* Seen one or more '*'s */
+    uint8_t xf_star[XF_WIDTH_NUM]; /* Seen one or more '*'s */
+    uint8_t xf_stars;		/* Seen one or more '*'s */
+    uint8_t xf_fc;	/* Format character */
+    uint8_t xf_enc;	/* Encoding of the string (XF_ENC_*) */
+    uint8_t xf_skip;	/* Skip this field */
+    uint8_t xf_lflag;	/* 'l' (long) */
+    uint8_t xf_hflag;;	/* 'h' (half) */
+    uint8_t xf_jflag;	/* 'j' (intmax_t) */
+    uint8_t xf_tflag;	/* 't' (ptrdiff_t) */
+    uint8_t xf_zflag;	/* 'z' (size_t) */
+    uint8_t xf_qflag;	/* 'q' (quad_t) */
+    uint8_t xf_seen_minus; /* Seen a minus */
+    int8_t xf_leading_zero;	/* Seen a leading zero (zero fill)  */
+    uint8_t xf_dots;		/* Seen one or more '.'s */
+    uint8_t xf_consumed;	/* va_arg already consumed by fast path */
+    uint8_t xf_alt;	/* "alternate form" ('#') flag */
 } xo_format_t;
+
+/* Flag operations */
+#define XOF_BIT_ISSET(_flag, _bit)	(((_flag) & (_bit)) ? 1 : 0)
+#define XOF_BIT_SET(_flag, _bit)	do { (_flag) |= (_bit); } while (0)
+#define XOF_BIT_CLEAR(_flag, _bit)	do { (_flag) &= ~(_bit); } while (0)
+
+#define XOF_ISSET(_xop, _bit) XOF_BIT_ISSET(_xop->xo_flags, _bit)
+#define XOF_SET(_xop, _bit) XOF_BIT_SET(_xop->xo_flags, _bit)
+#define XOF_CLEAR(_xop, _bit) XOF_BIT_CLEAR(_xop->xo_flags, _bit)
+
+#define XOIF_ISSET(_xop, _bit) XOF_BIT_ISSET(_xop->xo_iflags, _bit)
+#define XOIF_SET(_xop, _bit) XOF_BIT_SET(_xop->xo_iflags, _bit)
+#define XOIF_CLEAR(_xop, _bit) XOF_BIT_CLEAR(_xop->xo_iflags, _bit)
+
+/* Internal flags */
+#define XOIF_REORDER	XOF_BIT(0) /* Reordering fields; record field info */
+#define XOIF_DIV_OPEN	XOF_BIT(1) /* A <div> is open */
+#define XOIF_TOP_EMITTED XOF_BIT(2) /* The top JSON braces have been emitted */
+#define XOIF_ANCHOR	XOF_BIT(3) /* An anchor is in place  */
+
+#define XOIF_UNITS_PENDING XOF_BIT(4) /* We have a units-insertion pending */
+#define XOIF_INIT_IN_PROGRESS XOF_BIT(5) /* Init of handle is in progress */
+#define XOIF_MADE_OUTPUT XOF_BIT(6)	 /* Have already made output */
+#ifdef LIBXO_NEED_FILTERS
+#define XOIF_FILTERING	XOF_BIT(7)	 /* Actively filtering (XOF_FILTER) */
+#else  /* LIBXO_NEED_FILTERS */
+#define XOIF_FILTERING 0	/* Allow the compiler to trim filter code */
+#endif /* LIBXO_NEED_FILTERS */
 
 /*
  * We keep a 'default' handle to allow callers to avoid having to
@@ -920,6 +922,7 @@ static char xo_xml_amp[] = "&amp;";
 static char xo_xml_lt[] = "&lt;";
 static char xo_xml_gt[] = "&gt;";
 static char xo_xml_quot[] = "&quot;";
+#define XO_LEN_QUOT 6		/* strlen("&quot;") */
 static char xo_xml_square[] = { 0xE2, 0x96, 0xA1, 0 };
 
 #define XO_XML_ESCAPE_BINARY_UNICODE_BASE 0xe000
@@ -3157,9 +3160,6 @@ xo_needed_encoding (xo_handle_t *xop)
     if (XOF_ISSET(xop, XOF_UTF8)) /* Check the override flag */
 	return XF_ENC_UTF8;
 
-    if (xo_style(xop) == XO_STYLE_TEXT) /* Text defaults to locale */
-	return XF_ENC_LOCALE;
-
     return XF_ENC_UTF8;		/* Otherwise, we love UTF-8 */
 }
 
@@ -3646,15 +3646,22 @@ xo_parse_format_spec (xo_handle_t *xop, xo_format_t *xfp,
 
 	} else if (*cp == '-')
 	    xfp->xf_seen_minus = 1;
+
+	else if (*cp == '#')
+	    xfp->xf_alt = 1;
+
 	else if (isdigit((int) *cp)) {
 	    if (xfp->xf_leading_zero < 0)
 		xfp->xf_leading_zero = (*cp == '0');
 	    xo_bump_width(xfp, *cp - '0');
+
 	} else if (*cp == '*') {
 	    xfp->xf_stars += 1;
 	    xfp->xf_star[xfp->xf_dots] = 1;
+
 	} else if (strchr("diouxXDOUeEfFgGaAcCsSpm", *cp) != NULL)
 	    break;
+
 	else if (*cp == 'n' || *cp == 'v') {
 	    xo_failure(xop, "unsupported format: '%s'", fmt);
 	    return NULL;
@@ -3666,6 +3673,166 @@ xo_parse_format_spec (xo_handle_t *xop, xo_format_t *xfp,
 
     xfp->xf_fc = *cp;
     return cp;
+}
+
+/*
+ * A fast integer formatter — avoids vsnprintf/localeconv/lock
+ * overhead.  Handles %d/%i/%u/%o/%x/%X with optional l/ll, width,
+ * precision, '#', '0'.  We pull the integer from xop->xo_vap and write
+ * ASCII directly into xbp.  Sets xfp->xf_consumed so xo_advance_vap
+ * skips the double-pop.  Returns byte count written, or -1 on buffer
+ * error.
+ */
+static ssize_t
+xo_format_int_text (xo_handle_t *xop, xo_buffer_t *xbp, xo_format_t *xfp)
+{
+    char fc = xfp->xf_fc;
+    int is_signed = (fc == 'd' || fc == 'i');
+    int is_hex    = (fc == 'x' || fc == 'X');
+    int is_octal  = (fc == 'o');
+
+    unsigned long long uval;
+    long long sval = 0;
+
+    if (xfp->xf_lflag >= 2) {
+	if (is_signed) {
+	    sval = va_arg(xop->xo_vap, long long);
+	    uval = (unsigned long long) sval;
+
+	} else
+	    uval = va_arg(xop->xo_vap, unsigned long long);
+
+    } else if (xfp->xf_lflag == 1) {
+	if (is_signed) {
+	    sval = (long long) va_arg(xop->xo_vap, long);
+	    uval = (unsigned long long) sval;
+	} else
+	    uval = (unsigned long long) va_arg(xop->xo_vap, unsigned long);
+
+    } else {
+	if (is_signed) {
+	    sval = (long long) va_arg(xop->xo_vap, int);
+	    uval = (unsigned long long) sval;
+	} else
+	    uval = (unsigned long long) va_arg(xop->xo_vap, unsigned int);
+    }
+
+    xfp->xf_consumed = 1;
+
+    int negative = (is_signed && sval < 0);
+    unsigned long long absval = negative ? (0ULL - uval) : uval;
+
+    /* Format digits right-to-left */
+    char dbuf[24];		/* 22 digits max for 64-bit octal */
+    char *dep = dbuf + sizeof(dbuf);
+    char *dcp = dep;
+
+    if (absval == 0) {
+	*--dcp = '0';
+
+    } else if (is_hex) {
+	static const char lx[] = "0123456789abcdef";
+	static const char ux[] = "0123456789ABCDEF";
+	const char *digs = (fc == 'X') ? ux : lx;
+	while (absval) {
+	    *--dcp = digs[absval & 0xf];
+	    absval >>= 4;
+	}
+
+    } else if (is_octal) {
+	while (absval) {
+	    *--dcp = '0' + (int)(absval & 7);
+	    absval >>= 3;
+	}
+
+    } else {
+	while (absval) {
+	    unsigned long long q = absval / 10;
+	    *--dcp = '0' + (int)(absval - q * 10);
+	    absval = q;
+	}
+    }
+    ssize_t dlen = dep - dcp;
+
+    /* Precision: minimum digit count (e.g. %.8d → at least 8 digits) */
+    ssize_t precision = (xfp->xf_dots > 0 && xfp->xf_width[XF_WIDTH_SIZE] >= 0)
+	? xfp->xf_width[XF_WIDTH_SIZE] : -1;
+    ssize_t prec_zeros = (precision > dlen) ? precision - dlen : 0;
+
+    /*
+     * The "alternate form" prefix and octal zero.  Yes, this is the
+     * term from the printf(3) man page.
+     */
+    const char *prefix = "";
+    ssize_t prefix_len = 0;
+    if (xfp->xf_alt) {
+	if (is_hex && uval != 0) {
+	    prefix = (fc == 'X') ? "0X" : "0x";
+	    prefix_len = 2;
+	} else if (is_octal && prec_zeros == 0 && *dcp != '0') {
+	    prec_zeros = 1;	/* prepend a '0' for non-zero octal */
+	}
+    }
+
+    char sign = negative ? '-' : '\0';
+    ssize_t sign_len = sign ? 1 : 0;
+    ssize_t content_len = sign_len + prefix_len + prec_zeros + dlen;
+
+    /* Minimum field width */
+    ssize_t min_width = (xfp->xf_width[XF_WIDTH_MIN] >= 0)
+	? xfp->xf_width[XF_WIDTH_MIN] : 0;
+    ssize_t pad = (content_len < min_width) ? min_width - content_len : 0;
+
+    /* Zero-fill flag applies to width, but is ignored when precision is set */
+    int zero_fill = (xfp->xf_leading_zero > 0) && (precision < 0);
+
+    ssize_t total = content_len + pad;
+    if (xo_check_for_room(xop, xbp, total))
+	return -1;
+
+    char *op = xbp->xb_curp;
+
+    if (!xfp->xf_seen_minus && !zero_fill && pad > 0) {
+	memset(op, ' ', pad);	/* right-justify: leading spaces */
+	op += pad;
+    }
+
+    if (sign) *op++ = sign;
+    memcpy(op, prefix, prefix_len);
+    op += prefix_len;
+
+    ssize_t fill_zeros = prec_zeros + (zero_fill ? pad : 0);
+    if (fill_zeros > 0) {
+	memset(op, '0', fill_zeros);
+	op += fill_zeros;
+    }
+
+    memcpy(op, dcp, dlen);
+    op += dlen;
+
+    if (xfp->xf_seen_minus && pad > 0) {
+	memset(op, ' ', pad);	/* left-justify: trailing spaces */
+	op += pad;
+    }
+
+    return total;
+}
+
+/*
+ * Can we use the format_int code?
+ */
+static inline int
+xo_use_format_int (xo_handle_t *xop, int style, xo_format_t *xfp)
+{
+    if (xop->xo_formatter == NULL && style == XO_STYLE_TEXT
+            && !xfp->xf_stars
+	    && (xfp->xf_fc == 'd' || xfp->xf_fc == 'i' || xfp->xf_fc == 'u'
+	        || xfp->xf_fc == 'o' || xfp->xf_fc == 'x' || xfp->xf_fc == 'X')
+	    && !xfp->xf_jflag && !xfp->xf_tflag
+	    && !xfp->xf_zflag && !xfp->xf_qflag)
+	return TRUE;
+
+    return FALSE;
 }
 
 /*
@@ -3712,7 +3879,14 @@ xo_emit_field_value (xo_handle_t *xop, xo_buffer_t *xbp,
 	    rc = xo_trim_ws(xbp, rc);
 
     } else {
-	ssize_t columns = rc = xo_vsnprintf(xop, xbp, newfmt, xop->xo_vap);
+	ssize_t columns;
+
+	/* Use the fast path for integer formats — no vsnprintf/localeconv */
+	if (xo_use_format_int(xop, style, xfp)) {
+	    rc = columns = xo_format_int_text(xop, xbp, xfp);
+	} else {
+	    columns = rc = xo_vsnprintf(xop, xbp, newfmt, xop->xo_vap);
+	}
 
 	if (rc > 0) {
 	    /*
@@ -3778,6 +3952,10 @@ static void
 xo_advance_vap (xo_handle_t *xop, xo_format_t *xfp)
 {
     if (XOF_ISSET(xop, XOF_NO_VA_ARG))
+	return;
+
+    /* The fast integer path already consumed the arg */
+    if (xfp->xf_consumed)
 	return;
 
     if (xfp->xf_fc == 's' || xfp->xf_fc == 'S') {
@@ -3922,6 +4100,8 @@ xo_do_format_field (xo_handle_t *xop, xo_buffer_t *xbp,
 	    }
 	}
 
+	xf.xf_skip = 0;
+
 	/* Hidden fields are only visible to JSON and XML */
 	if (XOF_ISSET(xop, XFF_ENCODE_ONLY)) {
 	    if (style != XO_STYLE_XML
@@ -4005,35 +4185,36 @@ xo_do_format_field (xo_handle_t *xop, xo_buffer_t *xbp,
     return 0;
 }
 
-static inline int
-xo_fix_encoding_char (char ch)
-{
-    if (ch == '-')
-	return TRUE;
-    if (isdigit((int) ch))
-	return TRUE;
-    return FALSE;
-}
-
 /*
- * Remove any numeric precision/width format from the format string by
- * inserting the "%" after the [0-9]+, returning the substring.
+ * Remove a numeric width from the format string by inserting "%" just
+ * before the conversion letter, and returning the new substring.
+ * An optional leading '-' flag is skipped, but only when followed by
+ * actual digits (e.g. %-10s -> %s, %-8.1f -> %.1f).  Formats that use
+ * '*' for the width are returned unchanged because the width value lives
+ * in va_args and cannot be consumed here.
  */
 static char *
 xo_fix_encoding (xo_handle_t *xop UNUSED, char *encoding)
 {
     char *cp = encoding;
 
-    if (cp[0] != '%' || !xo_fix_encoding_char(cp[1]))
+    if (cp[0] != '%')
 	return encoding;
 
-    for (cp += 2; *cp; cp++) {
-	if (!xo_fix_encoding_char(*cp))
+    /* Skip optional '-' alignment flag, then require a literal digit width. */
+    cp++;
+    if (*cp == '-')
+	cp++;
+
+    if (!isdigit((int) *cp))
+	return encoding;
+
+    for (cp++; *cp; cp++) {
+	if (!isdigit((int) *cp))
 	    break;
     }
 
     *--cp = '%';		/* Back off and insert the '%' */
-
     return cp;
 }
 
@@ -4172,6 +4353,263 @@ xo_simple_field (xo_handle_t *xop, unsigned encode_only,
 }
 
 /*
+ * Append an XPath string literal for a predicate value.
+ *
+ * XPath 1.0 has no escape sequences, so we choose a quoting strategy
+ * based on what the value contains.  The value arrives already
+ * XML-attribute-escaped (XFF_ATTR), so a raw '"' has become "&quot;".
+ * We detect that form, and any '"' we write for XPath syntax also
+ * uses "&quot;" so that the enclosing HTML data-xpath="..." attribute
+ * stays well-formed (the HTML parser decodes &quot; -> " before XPath
+ * sees it).
+ *
+ *   no single quotes: 'value'
+ *   no double quotes: &quot;value&quot;
+ *   both: concat('seg', &quot;'&quot;, 'seg2', ...)
+ */
+static void
+xo_buf_append_xpath_string (xo_buffer_t *xbp, const char *val, ssize_t vlen)
+{
+    int has_sq = (memchr(val, '\'', vlen) != NULL);
+    /* &quot; is how XFF_ATTR encodes '"'; raw '"' should not appear */
+    int has_dq = (memmem(val, vlen, "&quot;", XO_LEN_QUOT) != NULL
+		  || memchr(val, '"', vlen) != NULL);
+
+    if (!has_sq) {
+	xo_buf_append(xbp, "'", 1);
+	xo_buf_append(xbp, val, vlen);
+	xo_buf_append(xbp, "'", 1);
+	return;
+    }
+
+    if (!has_dq) {
+	/* Delimiters written as &quot; so the HTML attribute stays valid */
+	xo_buf_append(xbp, "&quot;", XO_LEN_QUOT);
+	xo_buf_append(xbp, val, vlen);
+	xo_buf_append(xbp, "&quot;", XO_LEN_QUOT);
+	return;
+    }
+
+    /*
+     * Both quote types: split at each ' and use concat().  The
+     * single-quote separator is &quot;'&quot; in the HTML attribute,
+     * which the HTML parser decodes to "'" for XPath.
+     */
+    xo_buf_append(xbp, "concat(", 7);
+
+    const char *cp = val;
+    const char *ep = val + vlen;
+    int first = TRUE;
+
+    while (cp < ep) {
+	const char *np = memchr(cp, '\'', ep - cp);
+	ssize_t seglen = np ? np - cp : ep - cp;
+
+	if (seglen > 0) {
+	    if (!first)
+		xo_buf_append(xbp, ", ", 2);
+	    xo_buf_append(xbp, "'", 1);
+	    xo_buf_append(xbp, cp, seglen);
+	    xo_buf_append(xbp, "'", 1);
+	    first = FALSE;
+	}
+
+	if (np) {
+	    if (!first)
+		xo_buf_append(xbp, ", ", 2);
+	    xo_buf_append(xbp, "&quot;'&quot;", XO_LEN_QUOT + 1 + XO_LEN_QUOT);
+	    first = FALSE;
+	    cp = np + 1;
+	} else {
+	    break;
+	}
+    }
+
+    xo_buf_append(xbp, ")", 1);
+}
+
+static const char *
+xo_key_find_matching (const char *cp, char ch)
+{
+    if (ch == '"') {
+	/* Double-quote delimiter is stored as &quot; in the HTML attribute */
+	const char *np = strstr(cp, "&quot;");
+	return np ? np + XO_LEN_QUOT - 1 : NULL;  /* last char of &quot; */
+    }
+
+    for (; *cp; cp++) {
+	if (*cp == ch)
+	    return cp;
+    }
+
+    return NULL;
+}
+
+static int
+xo_key_is_duplicate (const char *name, ssize_t nlen, const char *keys)
+{
+    const char *cp = keys;
+
+    for (;;)  {
+	/* Start of the predicate */
+	if (*cp++ != '[')
+	    break;
+
+	if (strncmp(cp, name, nlen) == 0) {
+	    char ch = cp[nlen];
+	    if (ch == ' ' || ch == '=') {
+		/* Got a match; first wins, so we ignore this one */
+		return TRUE;
+	    }
+	}
+
+	for (; *cp; cp++) {
+	    if (*cp == ']')
+		break;
+	    if (*cp == '\'') {
+		cp = xo_key_find_matching(cp + 1, '\'');
+		if (cp == NULL)
+		    return FALSE; /* Bail! */
+	    } else if (strncmp(cp, "&quot;", XO_LEN_QUOT) == 0) {
+		cp = xo_key_find_matching(cp + XO_LEN_QUOT, '"');
+		if (cp == NULL)
+		    return FALSE; /* Bail! */
+	    }
+	}
+
+	if (*cp == '\0')
+	    break;
+	cp += 1;		/* Move over ']' */
+    }
+
+    return FALSE;
+}
+
+static void
+xo_build_predicate (xo_handle_t *xop, const char *name, ssize_t nlen,
+		    xo_xff_flags_t flags,
+		    const char *encoding, ssize_t elen)
+{
+    xo_stack_t *xsp = xo_stack_cur(xop);
+
+    if (xsp->xs_keys && xo_key_is_duplicate(name, nlen, xsp->xs_keys))
+	return;
+
+    va_list va_local;
+
+    va_copy(va_local, xop->xo_vap);
+    if (xop->xo_checkpointer)
+	xop->xo_checkpointer(xop, xop->xo_vap, 0);
+
+    /*
+     * Build an XPath predicate expression to match this key.
+     * We use the format buffer.
+     */
+    xo_buffer_t *pbp = &xop->xo_predicate;
+    xo_buf_reset(pbp); /* Restart buffer */
+
+    xo_buf_append(pbp, "[", 1);
+    xo_buf_escape(xop, pbp, name, nlen, 0);
+    if (XOF_ISSET(xop, XOF_PRETTY))
+	xo_buf_append(pbp, " = '", 4);
+    else
+	xo_buf_append(pbp, "='", 2);
+
+    xo_xff_flags_t pflags = flags | XFF_XML | XFF_ATTR;
+    pflags &= ~(XFF_NO_OUTPUT | XFF_ENCODE_ONLY);
+
+    /*
+     * Save offset after the opening "'" so val_off - 1 is the "'"
+     * itself.  xb_bufp may move on realloc inside xo_do_format_field.
+     */
+    ssize_t val_off = pbp->xb_curp - pbp->xb_bufp;
+    xo_do_format_field(xop, pbp, encoding, elen, pflags);
+
+    /*
+     * Trim leading/trailing spaces from the predicate value
+     * when requested, regardless of output style (predicates
+     * are always XPath strings).
+     */
+    if (flags & XFF_TRIM_WS) {
+	/* Recompute after possible realloc */
+	char *vs = pbp->xb_bufp + val_off;
+	char *ep = pbp->xb_curp;
+	while (ep > vs && ep[-1] == ' ')
+	    ep -= 1;
+
+	char *sp = vs;
+	while (sp < ep && *sp == ' ')
+	    sp += 1;
+
+	if (sp > vs || ep < pbp->xb_curp) {
+	    ssize_t trimlen = ep - sp;
+	    memmove(vs, sp, trimlen);
+	    pbp->xb_curp = vs + trimlen;
+	}
+    }
+
+    /*
+     * Quote the value for XPath.  XPath 1.0 has no escape mechanism.
+     * We already wrote an opening "'" before val_off (at val_off-1).
+     * Three cases based on what the formatted value contains:
+     * - no "'": close the single-quoted form (zero copy)
+     * - "'" only: swap to double-quoted form (small copy)
+     * -  both: use concat(); pay the alloca copy cost (rare, but expensive)
+     */
+    ssize_t vlen = pbp->xb_curp - (pbp->xb_bufp + val_off);
+    char *vs = pbp->xb_bufp + val_off;
+
+    if (memchr(vs, '\'', vlen) == NULL) {
+	/* Common case: no single quotes — close the single-quoted form */
+	xo_buf_append(pbp, "']", 2);
+
+    } else if (memmem(vs, vlen, "&quot;", XO_LEN_QUOT) == NULL
+	       && memchr(vs, '"', vlen) == NULL) {
+	/*
+	 * Has single-quote but no double-quote so we switch using
+	 * double quotes: &quot;value&quot;.  The opening "'" at
+	 * val_off - 1 is 1 byte; &quot; is XO_LEN_QUOT bytes, so
+	 * shift the value right by XO_LEN_QUOT-1 to make room.
+	 */
+	if (xo_buf_has_room(pbp, XO_LEN_QUOT - 1 + XO_LEN_QUOT + 1)) {
+	    /* Recompute since xb_bufp may have moved */
+	    vs = pbp->xb_bufp + val_off;
+	    memmove(vs + XO_LEN_QUOT - 1, vs, vlen);
+	    memcpy(vs - 1, "&quot;", XO_LEN_QUOT);
+	    pbp->xb_curp = vs + XO_LEN_QUOT - 1 + vlen;
+	    xo_buf_append(pbp, "&quot;]", XO_LEN_QUOT + 1);
+	}
+
+    } else {
+	/* Both kinds of quotes: must build concat(); copy value to stack */
+	char *val_copy = alloca(vlen);
+	memcpy(val_copy, vs, vlen);
+	pbp->xb_curp = pbp->xb_bufp + val_off - 1; /* Reset to opening quote */
+	xo_buf_append_xpath_string(pbp, val_copy, vlen);
+	xo_buf_append(pbp, "]", 1);
+    }
+
+    /* Append this predicate to the stack's key list */
+    ssize_t dlen = pbp->xb_curp - pbp->xb_bufp;
+    ssize_t olen = xsp->xs_keys ? strlen(xsp->xs_keys) : 0;
+    char *cp = xo_realloc(xsp->xs_keys, olen + dlen + 1);
+
+    if (cp) {
+	memcpy(cp + olen, pbp->xb_bufp, dlen);
+	cp[olen + dlen] = '\0';
+	xsp->xs_keys = cp;
+    }
+
+    /* Now we reset the xo_vap as if we were never here */
+    va_end(xop->xo_vap);
+    va_copy(xop->xo_vap, va_local);
+    va_end(va_local);
+
+    if (xop->xo_checkpointer)
+	xop->xo_checkpointer(xop, xop->xo_vap, 1);
+}
+
+/*
  * Html mode: append a <div> to the output buffer contain a field
  * along with all the supporting information indicated by the flags.
  */
@@ -4209,52 +4647,8 @@ xo_buf_append_div (xo_handle_t *xop, const char *class, xo_xff_flags_t flags,
 	(name && (flags & XFF_KEY) && !(flags & XFF_DISPLAY_ONLY)
 	 && XOF_ISSET(xop, XOF_XPATH)) ? 1 : 0;
 
-    if (need_predidate) {
-	va_list va_local;
-
-	va_copy(va_local, xop->xo_vap);
-	if (xop->xo_checkpointer)
-	    xop->xo_checkpointer(xop, xop->xo_vap, 0);
-
-	/*
-	 * Build an XPath predicate expression to match this key.
-	 * We use the format buffer.
-	 */
-	xo_buffer_t *pbp = &xop->xo_predicate;
-	xo_buf_reset(pbp); /* Restart buffer */
-
-	xo_buf_append(pbp, "[", 1);
-	xo_buf_escape(xop, pbp, name, nlen, 0);
-	if (XOF_ISSET(xop, XOF_PRETTY))
-	    xo_buf_append(pbp, " = '", 4);
-	else
-	    xo_buf_append(pbp, "='", 2);
-
-	xo_xff_flags_t pflags = flags | XFF_XML | XFF_ATTR;
-	pflags &= ~(XFF_NO_OUTPUT | XFF_ENCODE_ONLY);
-	xo_do_format_field(xop, pbp, encoding, elen, pflags);
-
-	xo_buf_append(pbp, "']", 2);
-
-	/* Now we record this predicate expression in the stack */
-	xo_stack_t *xsp = xo_stack_cur(xop);
-	ssize_t olen = xsp->xs_keys ? strlen(xsp->xs_keys) : 0;
-	ssize_t dlen = pbp->xb_curp - pbp->xb_bufp;
-
-	char *cp = xo_realloc(xsp->xs_keys, olen + dlen + 1);
-	if (cp) {
-	    memcpy(cp + olen, pbp->xb_bufp, dlen);
-	    cp[olen + dlen] = '\0';
-	    xsp->xs_keys = cp;
-	}
-
-	/* Now we reset the xo_vap as if we were never here */
-	va_end(xop->xo_vap);
-	va_copy(xop->xo_vap, va_local);
-	va_end(va_local);
-	if (xop->xo_checkpointer)
-	    xop->xo_checkpointer(xop, xop->xo_vap, 1);
-    }
+    if (need_predidate)
+	xo_build_predicate(xop, name, nlen, flags, encoding, elen);
 
     if (flags & XFF_ENCODE_ONLY) {
 	/*

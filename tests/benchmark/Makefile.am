@@ -1,7 +1,7 @@
 #
 # $Id$
 #
-# Copyright 2014, Juniper Networks, Inc.
+# Copyright 2025, Juniper Networks, Inc.
 # All rights reserved.
 # This SOFTWARE is licensed under the LICENSE provided in the
 # ../Copyright file. By downloading, installing, copying, or otherwise
@@ -23,13 +23,9 @@ AM_CFLAGS = \
 
 # Ick: maintained by hand!
 TEST_CASES = \
-utf8_01.c \
-utf8_02.c \
-utf8_03.c
+bm_01.c
 
-utf8_01_test_SOURCES = utf8_01.c
-utf8_02_test_SOURCES = utf8_02.c
-utf8_03_test_SOURCES = utf8_03.c
+bm_01_test_SOURCES = bm_01.c
 
 base_tests = ${TEST_CASES:.c=.test}
 
@@ -62,12 +58,6 @@ RUN_TESTS_CMD = ${BASH} ${RUN_TESTS_SH} -d ${srcdir}
 TEST_FILE = ${srcdir}/data_01.txt
 TEST_FORMATS = T
 
-all:
-
-valgrind:
-	@echo '## Running the regression tests under Valgrind'
-	CHECKER='valgrind -q' ${MAKE} run-plain-tests
-
 .PHONY: run-plain-tests run-validate-tests run-pass-tests
 
 # These are substituted by configure; non-empty only when HAVE_VALIDATE is set.
@@ -89,7 +79,53 @@ else
 PLUGIN_TESTS =
 endif
 
-test tests: ${noinst_PROGRAMS} run-plain-tests ${PLUGIN_TESTS}
+all:
+
+test tests:
+
+BM_TEST=bm_01.test
+PASS_TEST=bm_01.pass-test
+
+benchmark bm:
+	${MKDIR_P} out
+	DYLD_LIBRARY_PATH=${top_builddir}/libxo/.libs \
+		./.libs/${BM_TEST} ${BM_ARGS} \
+		> out/${BM_TEST}.out 2> out/${BM_TEST}.err
+
+bm.pass:
+	${MKDIR_P} out
+	DYLD_LIBRARY_PATH=${top_builddir}/libxo/.libs \
+		./.libs/${PASS_TEST} ${BM_ARGS} \
+		> out/${PASS_TEST}.out 2> out/${PASS_TEST}.err
+
+BM_COUNT=1000
+BM_ARGS=text count ${BM_COUNT} discard
+SAMPLE=sample
+SAMPLE_ARGS=
+
+# The sleep 0.3 gives the process time to get into its hot loop before
+# sample attaches. sample $BG_PID 8 samples for 8 seconds at the
+# default 1 ms interval.
+
+sample:
+	${MKDIR_P} out
+	DYLD_LIBRARY_PATH=${top_builddir}/libxo/.libs \
+		BIN=./.libs/${BM_TEST} \
+		BM_TEST=${BM_TEST} \
+	 	BM_ARGS="${BM_ARGS}" \
+		SAMPLE=${SAMPLE} \
+		SAMPLE_ARGS="${SAMPLE_ARGS}" \
+		sh ${srcdir}/run-bm.sh
+
+sample.pass:
+	${MKDIR_P} out
+	DYLD_LIBRARY_PATH=${top_builddir}/libxo/.libs \
+		BIN=./${PASS_TEST} \
+		BM_TEST=${PASS_TEST} \
+	 	BM_ARGS="${BM_ARGS}" \
+		SAMPLE=${SAMPLE} \
+		SAMPLE_ARGS="${SAMPLE_ARGS}" \
+		sh ${srcdir}/run-bm.sh
 
 run-plain-tests:
 	@${MKDIR} -p out
@@ -135,9 +171,9 @@ run-validate-tests: $(validate_tests)
 	@${MKDIR} -p out
 	-@for tc in ${TEST_CASES:.c=}; do \
 	    diff -Nu ${srcdir}/saved/$$tc.validate-test.make.out \
-	        out/$$tc.validate-test.make.out ; \
+	        $$tc.validate-test.make.out ; \
 	    diff -Nu ${srcdir}/saved/$$tc.validate-test.make.err \
-	        out/$$tc.validate-test.make.err ; \
+	        $$tc.validate-test.make.err ; \
 	done
 	@DYLD_LIBRARY_PATH="${LIBXO_LIBDIR}:${FORMAT_LIBDIR}:${DYLD_LIBRARY_PATH}" \
 	    LD_LIBRARY_PATH="${LIBXO_LIBDIR}:${FORMAT_LIBDIR}:${LD_LIBRARY_PATH}" \
@@ -148,9 +184,9 @@ run-pass-tests: $(pass_tests)
 	@${MKDIR} -p out
 	-@for tc in ${TEST_CASES:.c=}; do \
 	    diff -Nu ${srcdir}/saved/$$tc.pass-test.make.out \
-	        out/$$tc.pass-test.make.out ; \
+	        $$tc.pass-test.make.out ; \
 	    diff -Nu ${srcdir}/saved/$$tc.pass-test.make.err \
-	        out/$$tc.pass-test.make.err ; \
+	        $$tc.pass-test.make.err ; \
 	done
 	@DYLD_LIBRARY_PATH="${LIBXO_LIBDIR}:${FORMAT_LIBDIR}:${DYLD_LIBRARY_PATH}" \
 	    LD_LIBRARY_PATH="${LIBXO_LIBDIR}:${FORMAT_LIBDIR}:${LD_LIBRARY_PATH}" \
@@ -169,17 +205,17 @@ one:
 	${RUN_TESTS_CMD} -T "${TEST_FMT:-T}" -a "file ${TEST_FILE}" \
 	    run-bin ${TEST_BIN:-utf8_01.test}
 
-accept:
+no-accept:
 	@${MKDIR} -p ${srcdir}/saved
 	${RUN_TESTS_CMD} -T "${TEST_FORMATS}" accept-bin ${TEST_CASES:.c=.test}
 	-@test -z "${LLVM_CLANG}" || for tc in ${TEST_CASES:.c=}; do \
-	    cp out/$$tc.validate-test.make.out \
+	    cp $$tc.validate-test.make.out \
 	        ${srcdir}/saved/$$tc.validate-test.make.out 2>/dev/null ; \
-	    cp out/$$tc.validate-test.make.err \
+	    cp $$tc.validate-test.make.err \
 	        ${srcdir}/saved/$$tc.validate-test.make.err 2>/dev/null ; \
-	    cp out/$$tc.pass-test.make.out \
+	    cp $$tc.pass-test.make.out \
 	        ${srcdir}/saved/$$tc.pass-test.make.out 2>/dev/null ; \
-	    cp out/$$tc.pass-test.make.err \
+	    cp $$tc.pass-test.make.err \
 	        ${srcdir}/saved/$$tc.pass-test.make.err 2>/dev/null ; \
 	done
 
