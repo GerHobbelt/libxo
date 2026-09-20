@@ -13,7 +13,7 @@ message(STATUS "Building xo_validate against LLVM ${LLVM_VERSION}")
 
 # Root of the libxo source and build trees.
 # Override with: cmake -DXO_SRCDIR=... -DXO_BUILDDIR=...
-set(XO_SRCDIR   "${CMAKE_SOURCE_DIR}/.."  CACHE PATH "libxo source root")
+set(XO_SRCDIR   "${CMAKE_SOURCE_DIR}/../.."  CACHE PATH "libxo source root")
 set(XO_BUILDDIR "${XO_SRCDIR}/build"      CACHE PATH "libxo build root")
 
 find_library(XO_FORMAT_LIB xo_format

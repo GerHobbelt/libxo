@@ -15,6 +15,7 @@
 #include <inttypes.h>
 #include <string.h>
 #include <sys/param.h>
+#include <math.h>
 
 #include "xo_config.h"
 
@@ -100,6 +101,8 @@ typedef struct xo_tframe_s {
     int16_t xtf_deny_delta;	/* deny contribution to undo on pop */
     char *xtf_keys;		/* buffered "k\0v\0k2\0v2\0\0" pairs */
     ssize_t xtf_keys_len;
+    char *xtf_attrs;		/* buffered "@k\0v\0..." pairs (attributes) */
+    ssize_t xtf_attrs_len;
 } xo_tframe_t;
 
 /* Per-slot states */
@@ -301,6 +304,39 @@ xo_tframe_free_keys (xo_tframe_t *frame)
     }
 }
 
+static void
+xo_tframe_attr_add (xo_tframe_t *frame,
+		    const char *tag, xo_ssize_t tlen,
+		    const char *value, xo_ssize_t vlen)
+{
+    xo_ssize_t new_len = tlen + vlen + 3;
+    char *newp = xo_realloc(frame->xtf_attrs, frame->xtf_attrs_len + new_len);
+    if (newp == NULL)
+	return;
+
+    char *addp = newp + frame->xtf_attrs_len;
+    memcpy(addp, tag, tlen);
+    addp += tlen;
+    *addp++ = '\0';
+    memcpy(addp, value, vlen);
+    addp += vlen;
+    *addp++ = '\0';
+    *addp++ = '\0';
+
+    frame->xtf_attrs_len += new_len - 1;
+    frame->xtf_attrs = newp;
+}
+
+static void
+xo_tframe_free_attrs (xo_tframe_t *frame)
+{
+    if (frame->xtf_attrs) {
+	xo_free(frame->xtf_attrs);
+	frame->xtf_attrs = NULL;
+	frame->xtf_attrs_len = 0;
+    }
+}
+
 static int
 xo_tmatch_init (xo_handle_t *xop UNUSED, xo_tmatch_t *xm, xo_trie_t *trie)
 {
@@ -335,8 +371,10 @@ static void
 xo_tmatch_cleanup (xo_tmatch_t *xm)
 {
     if (xm->xm_stack) {
-	for (uint32_t d = 0; d <= xm->xm_depth; d++)
+	for (uint32_t d = 0; d <= xm->xm_depth; d++) {
 	    xo_tframe_free_keys(&xm->xm_stack[d]);
+	    xo_tframe_free_attrs(&xm->xm_stack[d]);
+	}
 	xo_free(xm->xm_stack);
 	xm->xm_stack = NULL;
     }
@@ -353,6 +391,8 @@ static void xo_tmatch_open(xo_handle_t *, xo_filter_t *, xo_tmatch_t *,
 			   const char *, ssize_t);
 static void xo_tmatch_close(xo_handle_t *, xo_filter_t *, xo_tmatch_t *,
 			    const char *, ssize_t);
+static int xo_tmatch_try_eager(xo_handle_t *, xo_filter_t *, xo_tframe_t *,
+			       xo_xparse_node_id_t, xo_tnode_t *, xo_tmatch_t *);
 
 /*
  * We maintain a set of filters (xo_filter_t), representing each
@@ -393,6 +433,8 @@ typedef struct xo_stack_s {
     xo_xparse_node_id_t xs_predicates; /* Predicate node */
     char *xs_keys;	         /* Keys stored as "key\0val\0k2\0v2\0\0"*/
     xo_ssize_t xs_keys_len; 	 /* Length of xs_keys */
+    char *xs_attrs;		 /* Attributes stored as "k\0v\0k2\0v2\0\0" */
+    xo_ssize_t xs_attrs_len;	 /* Length of xs_attrs */
     uint32_t xs_allow;		 /* Any 'allow' increment */
     uint32_t xs_pred;		 /* Any 'pred' increment */
     uint32_t xs_deny;		 /* Any 'deny' increment */
@@ -559,7 +601,8 @@ xo_tmatch_open (xo_handle_t *xop, xo_filter_t *xfp UNUSED,
 	    frame->xtf_node[s] = c;
 
 	    if (tn->xtn_pred) {
-		frame->xtf_state[s] = XTFS_PRED;
+		frame->xtf_state[s] =
+		    xo_tmatch_try_eager(xop, xfp, frame, tn->xtn_pred, tn, xm);
 	    } else {
 		frame->xtf_state[s] = XTFS_LIVE;
 		xo_tmatch_record_live(xm, frame, tn);
@@ -594,7 +637,8 @@ xo_tmatch_open (xo_handle_t *xop, xo_filter_t *xfp UNUSED,
 	frame->xtf_node[s] = r;
 
 	if (tn->xtn_pred) {
-	    frame->xtf_state[s] = XTFS_PRED;
+	    frame->xtf_state[s] =
+		xo_tmatch_try_eager(xop, xfp, frame, tn->xtn_pred, tn, xm);
 	} else {
 	    frame->xtf_state[s] = XTFS_LIVE;
 	    xo_tmatch_record_live(xm, frame, tn);
@@ -616,6 +660,7 @@ xo_tmatch_close (xo_handle_t *xop, xo_filter_t *xfp UNUSED,
     xm->xm_allow -= frame->xtf_allow_delta;
     xm->xm_deny  -= frame->xtf_deny_delta;
     xo_tframe_free_keys(frame);
+    xo_tframe_free_attrs(frame);
 
     xo_dbg(xop, "xo_tmatch_close: depth %u [allow %u/deny %u]",
 	   xm->xm_depth, xm->xm_allow, xm->xm_deny);
@@ -630,6 +675,9 @@ xo_tmatch_close (xo_handle_t *xop, xo_filter_t *xfp UNUSED,
 static xo_filter_status_t xo_tmatch_key(xo_handle_t *, xo_filter_t *,
 					 xo_tmatch_t *, const char *,
 					 xo_ssize_t, const char *, xo_ssize_t);
+static xo_filter_status_t xo_tmatch_attr(xo_handle_t *, xo_filter_t *,
+					  xo_tmatch_t *, const char *,
+					  xo_ssize_t, const char *, xo_ssize_t);
 
 /*
  * Add a filter (xpath) to our filtering mechanism
@@ -648,9 +696,11 @@ xo_filter_op_add_one (xo_handle_t *xop, const char *input)
 
     if (rc == 0) {
 	static int unsupported_tokens[] = {
-	    L_AT, L_DOTDOT, L_DOTDOTDOT, L_DSLASH, L_QUESTION, L_STAR,
-	    L_UNDERSCORE, K_COMMENT, K_ID, K_KEY, K_NODE, K_TEXT,
-	    T_VAR, M_SEQUENCE, C_INDEX, C_TEST, C_UNION,
+	    L_DOTDOT, L_DOTDOTDOT, L_DOT, L_QUESTION, L_STAR,
+	    L_ASTERISK, L_UNDERSCORE, K_COMMENT, K_ID, K_KEY, K_NODE,
+	    K_PROCESSING_INSTRUCTION, K_TEXT,
+	    T_AXIS_NAME, T_VAR, M_SEQUENCE, C_DESCENDANT, C_INDEX,
+	    C_TEST, C_UNION,
 	    0
 	};
 
@@ -872,6 +922,34 @@ xo_filter_key_find (xo_filter_t *xfp UNUSED,
     return match;
 }
 
+static const char *
+xo_filter_attr_find (xo_filter_t *xfp UNUSED,
+		     xo_match_t *xmp, const char *tag)
+{
+    xo_ssize_t off = 0;
+    xo_stack_t *xsp = xmp->xm_stackp;
+    xo_ssize_t len = xsp->xs_attrs_len;
+    char *cp = xsp->xs_attrs;
+    const char *match = NULL;
+
+    while (off < len) {
+	if (*cp == '\0')
+	    break;
+
+	xo_ssize_t klen = strlen(cp);
+	if (xo_streq(tag, cp))
+	    match = cp + klen + 1;
+
+	xo_ssize_t vlen = strlen(cp + klen + 1);
+	xo_ssize_t tlen = klen + 1 + vlen + 1;
+
+	off += tlen;
+	cp += tlen;
+    }
+
+    return match;
+}
+
 /* ------------------------------------------------------------- */
 
 /*
@@ -914,10 +992,16 @@ typedef struct xo_eval_value_s {
 #define XEVF_FINAL	(1<<3)  /* This is the final answer */
 
 #define XO_EVAL_VALUE_ZERO { .xev_type = C_INT64, .xev_flags = 0 }
+#define XO_EVAL_VALUE_FLOAT { .xev_type = C_FLOAT, .xev_flags = 0 }
 #define XO_EVAL_VALUE_BOOLEAN_FALSE { .xev_type = C_BOOLEAN }
+#define XO_EVAL_VALUE_BOOLEAN_TRUE { .xev_type = C_BOOLEAN, .xev_int64 = 1 }
 #define XO_EVAL_VALUE_INVALID { .xev_type = M_ERROR, .xev_flags = XEVF_INVALID }
 #define XO_EVAL_VALUE_MISSING {  .xev_flags = XEVF_MISSING }
 #define XO_EVAL_VALUE_UNSUPPORTED {  .xev_flags = XEVF_UNSUPPORTED }
+
+static xo_eval_value_t xo_tmatch_eval_pred(xo_handle_t *, xo_filter_t *,
+					   xo_tframe_t *, xo_xparse_node_id_t);
+static int xo_eval_cast_boolean(xo_filter_t *, xo_eval_value_t);
 
 #define XO_EVAL_OP_ARGS \
     xo_handle_t *xop UNUSED, xo_filter_t *xfp UNUSED, xo_match_t *xmp UNUSED, \
@@ -1023,7 +1107,7 @@ xo_eval_number (XO_EVAL_NODE_ARGS)
 
 	} else {
 	    /* We can't give an error, so we just return 0 */
-	    xo_failure(xop, "invalid number value: '%s'", xnp->xn_str);
+	    xo_failure(xop, "invalid number value: '%s'", str);
 	    value = xo_eval_value_make(C_INT64, 0, 0);
 	    value.xev_int64 = 0;
 	}
@@ -1049,31 +1133,57 @@ xo_eval_quoted (XO_EVAL_NODE_ARGS)
 }
 
 static xo_eval_value_t
+xo_eval_attribute (XO_EVAL_NODE_ARGS)
+{
+    xo_eval_value_t value = { .xev_flags = 0 };
+    const char *str = xo_xparse_str(&xfp->xf_xd, xnp->xn_str);
+    const char *aval = xo_filter_attr_find(xfp, xmp, str);
+    if (aval) {
+	value = xo_eval_value_make(C_STRING, 0, 0);
+	value.xev_str = aval;
+    } else {
+	value.xev_flags |= XEVF_MISSING;
+    }
+    return value;
+}
+
+static xo_eval_value_t
 xo_eval_path (XO_EVAL_NODE_ARGS)
 {
     xo_eval_value_t value = { .xev_flags = 0 };
     xo_xparse_node_t *elt = NULL;
+    int is_attr = FALSE;
     xo_xparse_node_id_t id;
 
-    /* We only support a single element in the path, which must be a key */
+    /* We only support a single element or attribute in the path */
     for (id = xnp->xn_contents; id; id = xnp->xn_next) {
 	xnp = xo_xparse_node(&xfp->xf_xd, id);
-	if (xnp->xn_type != C_ELEMENT) {
+	if (xnp->xn_type == C_ELEMENT) {
+	    if (elt == NULL) {
+		elt = xnp;
+		is_attr = FALSE;
+	    } else return xo_eval_value_invalid();
+	} else if (xnp->xn_type == C_ATTRIBUTE) {
+	    if (elt == NULL) {
+		elt = xnp;
+		is_attr = TRUE;
+	    } else return xo_eval_value_invalid();
+	} else if (xnp->xn_type == C_ABSOLUTE) {
+	    /* skip */
+	} else {
 	    xo_failure(xop, "filter: non-element path member (%s)",
 		       xo_xparse_fancy_token_name(xnp->xn_type));
 	    continue;
 	}
-
-	if (elt == NULL)
-	    elt = xnp;
-	else return xo_eval_value_invalid();
     }
 
     if (elt == NULL)
 	return value;
 
     const char *str = xo_xparse_str(&xfp->xf_xd, elt->xn_str);
-    const char *sval = xo_filter_key_find(xfp, xmp, str);
+    const char *sval = is_attr
+	? xo_filter_attr_find(xfp, xmp, str)
+	: xo_filter_key_find(xfp, xmp, str);
     if (sval) {
 	value = xo_eval_value_make(C_STRING, 0, 0);
 	value.xev_str = sval;
@@ -1515,16 +1625,19 @@ xo_eval_op_mod (XO_EVAL_OP_ARGS)
 static xo_eval_value_t
 xo_eval_not (XO_EVAL_NODE_ARGS)
 {
-    xo_eval_value_t value = XO_EVAL_VALUE_BOOLEAN_FALSE;
+    xo_eval_value_t value;
 
     /* We only support a single element in the path, which must be a key */
     value = xo_eval(xop, xfp, xmp, "arguments", indent,
-			xnp->xn_contents, NULL);
-
+                       xnp->xn_contents, NULL);
     xo_eval_dump_value(xop, xfp, value, indent, "xo_eval_not");
+
+    if (value.xev_flags & XEVF_MISSING)
+	return value;
 
     int bool = xo_eval_cast_boolean(xfp, value);
     value.xev_int64 = bool ? 0 : 1; /* Perform the 'not' */
+    value.xev_type = C_BOOLEAN;
     return value;
 }
 
@@ -1640,6 +1753,78 @@ xo_eval_func_ends_with (XO_EVAL_NODE_ARGS)
     return value;
 }
 
+static xo_eval_value_t
+xo_eval_func_true (XO_EVAL_NODE_ARGS)
+{
+    xo_eval_value_t value = XO_EVAL_VALUE_BOOLEAN_TRUE;
+    return value;
+}
+
+static xo_eval_value_t
+xo_eval_func_false (XO_EVAL_NODE_ARGS)
+{
+    xo_eval_value_t value = XO_EVAL_VALUE_BOOLEAN_FALSE;
+    return value;
+}
+
+static xo_eval_value_t
+xo_eval_func_boolean (XO_EVAL_NODE_ARGS)
+{
+    xo_eval_value_t value = xo_eval_not(XO_EVAL_NODE_PASS);
+    if (value.xev_flags & XEVF_MISSING)
+	return value;
+
+    value.xev_int64 = value.xev_int64 ? 0 : 1;	/* invert not() */
+    return value;
+}
+
+static xo_eval_value_t
+xo_eval_func_ceiling (XO_EVAL_NODE_ARGS)
+{
+    xo_eval_value_t value;
+
+    /* We only support a single element in the path, which must be a key */
+    value = xo_eval(xop, xfp, xmp, "arguments", indent,
+                       xnp->xn_contents, NULL);
+    if (value.xev_flags & XEVF_MISSING)
+	return value;
+
+    xo_float_t fval = xo_eval_cast_float(xfp, value);
+    fval = ceil(fval);
+    return xo_eval_value_float(0, fval);
+}
+
+static xo_eval_value_t
+xo_eval_func_floor (XO_EVAL_NODE_ARGS)
+{
+    xo_eval_value_t value;
+
+    /* We only support a single element in the path, which must be a key */
+    value = xo_eval(xop, xfp, xmp, "arguments", indent,
+                       xnp->xn_contents, NULL);
+    if (value.xev_flags & XEVF_MISSING)
+	return value;
+
+    xo_float_t fval = xo_eval_cast_float(xfp, value);
+    fval = floor(fval);
+    return xo_eval_value_float(0, fval);
+}
+
+static xo_eval_value_t
+xo_eval_func_number (XO_EVAL_NODE_ARGS)
+{
+    xo_eval_value_t value;
+
+    /* We only support a single element in the path, which must be a key */
+    value = xo_eval(xop, xfp, xmp, "arguments", indent,
+                       xnp->xn_contents, NULL);
+    if (value.xev_flags & XEVF_MISSING)
+	return value;
+
+    xo_float_t fval = xo_eval_cast_float(xfp, value);
+    return xo_eval_value_float(0, fval);
+}
+
 /*
  * Map between names and numbers and functions, searchable by string
  * name.
@@ -1650,8 +1835,16 @@ typedef struct xo_eval_func_map_s {
 } xo_eval_func_map_t;
 
 xo_eval_func_map_t xo_eval_functions[] = {
-    { xo_eval_func_starts_with, "starts-with" },
+    { xo_eval_func_boolean, "boolean" },
+    { xo_eval_func_ceiling, "ceiling" },
     { xo_eval_func_ends_with, "ends-with" },
+    { xo_eval_func_false, "false" },
+    { xo_eval_func_floor, "floor" },
+    { xo_eval_not, "not" },
+    { xo_eval_func_number, "number" },
+    { xo_eval_func_starts_with, "starts-with" },
+    { xo_eval_func_true, "true" },
+    
     { NULL, NULL }
 };
 
@@ -1713,6 +1906,10 @@ xo_eval (xo_handle_t *xop, xo_filter_t *xfp, xo_match_t *xmp,
 	nested_op_fn = NULL;
 
 	switch (xnp->xn_type) {
+
+	case C_ATTRIBUTE:
+	    node_fn = xo_eval_attribute;
+	    break;
 
 	case C_PATH:
 	    node_fn = xo_eval_path;
@@ -1902,13 +2099,14 @@ xo_filter_pred_eval (xo_handle_t *xop, xo_filter_t *xfp, xo_match_t *xmp)
 static int
 xo_filter_pred_needs (xo_xparse_data_t *xdp, xo_filter_t *xfp,
 		      xo_xparse_node_id_t id,
-		      const char *tag, xo_ssize_t tlen)
+		      const char *tag, xo_ssize_t tlen, int is_attr)
 {
     xo_xparse_node_t *xnp;
+    xo_xparse_token_t want_type = is_attr ? C_ATTRIBUTE : C_ELEMENT;
 
     for (; id; id = xnp->xn_next) {
 	xnp = xo_xparse_node(xdp, id);
-	if (xnp->xn_type == C_ELEMENT) {
+	if (xnp->xn_type == want_type) {
 	    const char *str = xo_xparse_str(xdp, xnp->xn_str);
 	    xo_ssize_t slen = strlen(str);
 	    if (slen == tlen && memcmp(str, tag, slen) == 0)
@@ -1919,7 +2117,7 @@ xo_filter_pred_needs (xo_xparse_data_t *xdp, xo_filter_t *xfp,
 
 	if (xnp->xn_contents)
 	    if (xo_filter_pred_needs(xdp, xfp, xnp->xn_contents,
-				     tag, tlen))
+				     tag, tlen, is_attr))
 		return TRUE;
     }
 
@@ -1938,6 +2136,8 @@ xo_tmatch_eval_pred (xo_handle_t *xop, xo_filter_t *xfp,
     bzero(&tmp_stack, sizeof(tmp_stack));
     tmp_stack.xs_keys = frame->xtf_keys;
     tmp_stack.xs_keys_len = frame->xtf_keys_len;
+    tmp_stack.xs_attrs = frame->xtf_attrs;
+    tmp_stack.xs_attrs_len = frame->xtf_attrs_len;
     tmp_stack.xs_predicates = pred_id;
 
     xo_match_t tmp_match;
@@ -1945,6 +2145,25 @@ xo_tmatch_eval_pred (xo_handle_t *xop, xo_filter_t *xfp,
     tmp_match.xm_stackp = &tmp_stack;
 
     return xo_filter_pred_eval(xop, xfp, &tmp_match);
+}
+
+/*
+ * Eagerly evaluate a predicate at instance-open time with no keys yet.
+ * Returns XTFS_LIVE, XTFS_DEAD, or XTFS_PRED (predicate needs key data).
+ */
+static int
+xo_tmatch_try_eager (xo_handle_t *xop, xo_filter_t *xfp,
+		     xo_tframe_t *frame, xo_xparse_node_id_t pred,
+		     xo_tnode_t *tn, xo_tmatch_t *xm)
+{
+    xo_eval_value_t result = xo_tmatch_eval_pred(xop, xfp, frame, pred);
+    if (result.xev_flags & XEVF_MISSING)
+	return XTFS_PRED;
+    if (xo_eval_cast_boolean(xfp, result)) {
+	xo_tmatch_record_live(xm, frame, tn);
+	return XTFS_LIVE;
+    }
+    return XTFS_DEAD;
 }
 
 static xo_filter_status_t
@@ -1964,7 +2183,7 @@ xo_tmatch_key (xo_handle_t *xop, xo_filter_t *xfp, xo_tmatch_t *xm,
 
 	xo_tnode_t *tn = &xtp->xt_nodes[frame->xtf_node[i]];
 
-	if (!xo_filter_pred_needs(&xfp->xf_xd, xfp, tn->xtn_pred, tag, tlen))
+	if (!xo_filter_pred_needs(&xfp->xf_xd, xfp, tn->xtn_pred, tag, tlen, FALSE))
 	    continue;
 
 	xo_tframe_key_add(frame, tag, tlen, value, vlen);
@@ -2006,6 +2225,68 @@ xo_filter_op_key (XO_FILTER_KEY_SIGNATURE)
     return rc;
 }
 
+static xo_filter_status_t
+xo_tmatch_attr (xo_handle_t *xop, xo_filter_t *xfp, xo_tmatch_t *xm,
+		const char *tag, xo_ssize_t tlen,
+		const char *value, xo_ssize_t vlen)
+{
+    if (xm->xm_depth == 0)
+	return xfp->xf_status;
+
+    xo_trie_t *xtp = xm->xm_trie;
+    xo_tframe_t *frame = &xm->xm_stack[xm->xm_depth];
+
+    for (uint32_t i = 0; i < frame->xtf_count; i++) {
+	if (frame->xtf_state[i] != XTFS_PRED)
+	    continue;
+
+	xo_tnode_t *tn = &xtp->xt_nodes[frame->xtf_node[i]];
+
+	if (!xo_filter_pred_needs(&xfp->xf_xd, xfp, tn->xtn_pred,
+				  tag, tlen, TRUE))
+	    continue;
+
+	xo_tframe_attr_add(frame, tag, tlen, value, vlen);
+
+	xo_eval_value_t result =
+	    xo_tmatch_eval_pred(xop, xfp, frame, tn->xtn_pred);
+
+	if (result.xev_flags & XEVF_MISSING)
+	    continue;
+
+	if (xo_eval_cast_boolean(xfp, result)) {
+	    frame->xtf_state[i] = XTFS_LIVE;
+	    xo_tmatch_record_live(xm, frame, tn);
+	} else {
+	    frame->xtf_state[i] = XTFS_DEAD;
+	}
+    }
+
+    return xfp->xf_status;
+}
+
+static int
+xo_filter_op_attribute (xo_handle_t *xop, xo_filter_t *xfp,
+			const char *tag, xo_ssize_t tlen,
+			const char *value, xo_ssize_t vlen)
+{
+    if (xfp == NULL || xfp->xf_trie == NULL)
+	return 0;
+
+    XO_DBG(xop, "xo_filter_attribute: '@%.*s' = '%.*s'", tlen, tag, vlen, value);
+
+    xo_filter_status_t rc = xo_tmatch_attr(xop, xfp, &xfp->xf_tmatch,
+					    tag, tlen, value, vlen);
+
+    xo_filter_change_status(xop, xfp, "attr", tag, tlen);
+
+    XO_DBG(xop, "xo_filter_attribute: '@%.*s' = '%.*s' --> status %s",
+	   tlen, tag, vlen, value,
+	   xo_filter_op_status_name(xfp->xf_status));
+
+    return rc;
+}
+
 /* ------------------------------------------------------------- */
 
 /*
@@ -2039,31 +2320,14 @@ xo_filter_op_passthru (XO_ENCODER_HANDLER_ARGS,
 	 */
 	break;
 
+    case XO_OP_ATTRIBUTE:	   /* Attribute name/value */
+	if (name && value)
+	    xo_filter_op_attribute(xop, xfp, name, strlen(name),
+				   value, strlen(value));
+	break;
+
     case XO_OP_STRING:		   /* Quoted UTF-8 string */
     case XO_OP_CONTENT:		   /* Other content */
-    case XO_OP_ATTRIBUTE:;	   /* Attribute name/value */
-#if 0
-	if (xfp->xf_status == XO_STATUS_DEAD) /* The dead have no cares */
-	    return 0;
-
-	/*
-	 * If the filters aren't all dead, we always want to pass keys
-	 * along.  For non-keys, we look at 'allow' to decide: if
-	 * allow is false, we don't want it.
-	 */
-	if (flags & XFF_KEY) { /* Always need keys */
-	    /*
-	     * Let the predicate logic know we've got a key.
-	     */
-	    xo_filter_op_key(xop, xfp, name, strlen(name),
-			     value, strlen(value));
-
-	} else {
-	    if (xfp->xf_status == XO_STATUS_TRACK)
-		return 0;  	  /* Tracking doesn't need non-keys */
-	}
-#endif
-
 	break;
     }
 
