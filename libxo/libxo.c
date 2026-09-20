@@ -178,8 +178,6 @@
 const char xo_version[] = LIBXO_VERSION;
 const char xo_version_extra[] = LIBXO_VERSION_EXTRA;
 
-#define UNUSED XO_UNUSED
-
 #ifndef LIBXO_TEXT_ONLY
 #define XO_MAP_INCR 128		/* Must be even */
 
@@ -1502,11 +1500,10 @@ xo_data_escape (xo_handle_t *xop, const char *str, ssize_t len)
     xo_buf_escape(xop, &xop->xo_data, str, len, 0);
 }
 
-#ifdef LIBXO_NO_RETAIN
 /*
- * Empty implementations of the retain logic
+ * The retain feature (caching parsed field info by format string pointer)
+ * has been removed.  These stubs preserve the public API.
  */
-
 void
 xo_retain_clear_all (void)
 {
@@ -1518,193 +1515,12 @@ xo_retain_clear (const char *fmt UNUSED)
 {
     return;
 }
-static void
-xo_retain_add (const char *fmt UNUSED, xo_field_info_t *fields UNUSED,
-		unsigned num_fields UNUSED)
-{
-    return;
-}
-
-static int
-xo_retain_find (const char *fmt UNUSED, xo_field_info_t **valp UNUSED,
-		 unsigned *nump UNUSED)
-{
-    return -1;
-}
 
 unsigned long
 xo_retain_get_hits (void)
 {
     return 0;
 }
-
-#else /* !LIBXO_NO_RETAIN */
-/*
- * Retain: We retain parsed field definitions to enhance performance,
- * especially inside loops.  We depend on the caller treating the format
- * strings as immutable, so that we can retain pointers into them.  We
- * hold the pointers in a hash table, so allow quick access.  Retained
- * information is retained until xo_retain_clear is called.
- */
-
-/*
- * xo_retain_entry_t holds information about one retained set of
- * parsed fields.
- */
-typedef struct xo_retain_entry_s {
-    struct xo_retain_entry_s *xre_next; /* Pointer to next (older) entry */
-    unsigned long xre_hits;		 /* Number of times we've hit */
-    const char *xre_format;		 /* Pointer to format string */
-    unsigned xre_num_fields;		 /* Number of fields saved */
-    xo_field_info_t *xre_fields;	 /* Pointer to fields */
-} xo_retain_entry_t;
-
-/*
- * xo_retain_t holds a complete set of parsed fields as a hash table.
- */
-#ifndef XO_RETAIN_SIZE
-#define XO_RETAIN_SIZE 6
-#endif /* XO_RETAIN_SIZE */
-#define RETAIN_HASH_SIZE (1<<XO_RETAIN_SIZE)
-
-typedef struct xo_retain_s {
-    xo_retain_entry_t *xr_bucket[RETAIN_HASH_SIZE];
-} xo_retain_t;
-
-static THREAD_LOCAL(xo_retain_t) xo_retain;
-static THREAD_LOCAL(unsigned) xo_retain_count;
-static THREAD_LOCAL(unsigned long) xo_retain_hits;
-
-/*
- * Simple hash function based on Thomas Wang's paper.  The original is
- * gone, but an archive is available on the Way Back Machine:
- *
- * http://web.archive.org/web/20071223173210/\
- *     http://www.concentric.net/~Ttwang/tech/inthash.htm
- *
- * For our purposes, we can assume the low four bits are uninteresting
- * since any string less that 16 bytes wouldn't be worthy of
- * retaining.  We toss the high bits also, since these bits are likely
- * to be common among constant format strings.  We then run Wang's
- * algorithm, and cap the result at RETAIN_HASH_SIZE.
- */
-static unsigned
-xo_retain_hash (const char *fmt)
-{
-    volatile uintptr_t iptr = (uintptr_t) (const void *) fmt;
-
-    /* Discard low four bits and high bits; they aren't interesting */
-    uint32_t val = (uint32_t) ((iptr >> 4) & (((1 << 24) - 1)));
-
-    val = (val ^ 61) ^ (val >> 16);
-    val = val + (val << 3);
-    val = val ^ (val >> 4);
-    val = val * 0x3a8f05c5;	/* My large prime number */
-    val = val ^ (val >> 15);
-    val &= RETAIN_HASH_SIZE - 1;
-
-    return val;
-}	
-
-/*
- * Walk all buckets, clearing all retained entries
- */
-void
-xo_retain_clear_all (void)
-{
-    int i;
-    xo_retain_entry_t *xrep, *next;
-
-    for (i = 0; i < RETAIN_HASH_SIZE; i++) {
-	for (xrep = xo_retain.xr_bucket[i]; xrep; xrep = next) {
-	    next = xrep->xre_next;
-	    xo_free(xrep);
-	}
-	xo_retain.xr_bucket[i] = NULL;
-    }
-    xo_retain_count = 0;
-    xo_retain_hits = 0;
-}
-
-/*
- * Walk all buckets, clearing all retained entries
- */
-void
-xo_retain_clear (const char *fmt)
-{
-    xo_retain_entry_t **xrepp;
-    unsigned hash = xo_retain_hash(fmt);
-
-    for (xrepp = &xo_retain.xr_bucket[hash]; *xrepp;
-	 xrepp = &(*xrepp)->xre_next) {
-	if ((*xrepp)->xre_format == fmt) {
-	    *xrepp = (*xrepp)->xre_next;
-	    xo_retain_count -= 1;
-	    return;
-	}
-    }
-}
-
-/*
- * Search the hash for an entry matching 'fmt'; return it's fields.
- */
-static int
-xo_retain_find (const char *fmt, xo_field_info_t **valp, unsigned *nump)
-{
-    if (xo_retain_count == 0)
-	return -1;
-
-    unsigned hash = xo_retain_hash(fmt);
-    xo_retain_entry_t *xrep;
-
-    for (xrep = xo_retain.xr_bucket[hash]; xrep != NULL;
-	 xrep = xrep->xre_next) {
-	if (xrep->xre_format == fmt) {
-	    *valp = xrep->xre_fields;
-	    *nump = xrep->xre_num_fields;
-	    xrep->xre_hits += 1;
-	    xo_retain_hits += 1;
-	    return 0;
-	}
-    }
-
-    return -1;
-}
-
-static void
-xo_retain_add (const char *fmt, xo_field_info_t *fields, unsigned num_fields)
-{
-    unsigned hash = xo_retain_hash(fmt);
-    xo_retain_entry_t *xrep;
-    ssize_t sz = sizeof(*xrep) + (num_fields + 1) * sizeof(*fields);
-    xo_field_info_t *xfip;
-
-    xrep = xo_realloc(NULL, sz);
-    if (xrep == NULL)
-	return;
-
-    xfip = (xo_field_info_t *) &xrep[1];
-    memcpy(xfip, fields, num_fields * sizeof(*fields));
-
-    bzero(xrep, sizeof(*xrep));
-
-    xrep->xre_format = fmt;
-    xrep->xre_fields = xfip;
-    xrep->xre_num_fields = num_fields;
-
-    /* Record the field info in the retain bucket */
-    xrep->xre_next = xo_retain.xr_bucket[hash];
-    xo_retain.xr_bucket[hash] = xrep;
-    xo_retain_count += 1;
-}
-
-unsigned long
-xo_retain_get_hits (void)
-{
-    return xo_retain_hits;
-}
-
-#endif /* !LIBXO_NO_RETAIN */
 
 /*
  * The "warn" flag has nothing to do with the "warn" function.  This
@@ -2362,7 +2178,7 @@ static xo_flag_mapping_t xo_xof_names[] = {
     { XOF_LOG_SYSLOG, "log-syslog" },
     { XOF_NO_HUMANIZE, "no-humanize" },
     { XOF_NO_LOCALE, "no-locale" },
-    { XOF_RETAIN_NONE, "no-retain" },
+    { 0, "no-retain" },		/* Deprecated: retain feature removed */
     { XOF_NO_TOP, "no-top" },
     { XOF_NO_TOP_LEVEL, "no-top-level" },
     { XOF_NOT_FIRST, "not-first" },
@@ -2447,8 +2263,9 @@ xo_set_style_name (xo_handle_t *xop, const char *name)
  * Look for something like "colors=red/blue+green/yellow" as fg/bg pairs.
  */
 static void
-xo_set_color_map (xo_handle_t *xop, char *value)
+xo_set_color_map (xo_handle_t *xop UNUSED, char *value UNUSED)
 {
+#ifndef LIBXO_TEXT_ONLY
     if (xo_text_only())
 	return;
 
@@ -2468,10 +2285,8 @@ xo_set_color_map (xo_handle_t *xop, char *value)
 	fg = *cp ? xo_color_find(cp) : -1;
 	bg = (vp && *vp) ? xo_color_find(vp) : -1;
 
-#ifndef LIBXO_TEXT_ONLY
 	xop->xo_color_map_fg[num] = (fg < 0) ? num : fg;
 	xop->xo_color_map_bg[num] = (bg < 0) ? num : bg;
-#endif /* LIBXO_TEXT_ONLY */
 
 	if (++num >= XO_NUM_COLORS)
 	    break;
@@ -2483,7 +2298,6 @@ xo_set_color_map (xo_handle_t *xop, char *value)
     else
 	XOF_CLEAR(xop, XOF_COLOR_MAP);
 
-#ifndef LIBXO_TEXT_ONLY
     /* Fill in the rest of the colors with the defaults */
     for ( ; num < XO_NUM_COLORS; num++)
 	xop->xo_color_map_fg[num] = xop->xo_color_map_bg[num] = num;
@@ -4191,6 +4005,16 @@ xo_do_format_field (xo_handle_t *xop, xo_buffer_t *xbp,
     return 0;
 }
 
+static inline int
+xo_fix_encoding_char (char ch)
+{
+    if (ch == '-')
+	return TRUE;
+    if (isdigit((int) ch))
+	return TRUE;
+    return FALSE;
+}
+
 /*
  * Remove any numeric precision/width format from the format string by
  * inserting the "%" after the [0-9]+, returning the substring.
@@ -4200,11 +4024,11 @@ xo_fix_encoding (xo_handle_t *xop UNUSED, char *encoding)
 {
     char *cp = encoding;
 
-    if (cp[0] != '%' || !isdigit((int) cp[1]))
+    if (cp[0] != '%' || !xo_fix_encoding_char(cp[1]))
 	return encoding;
 
     for (cp += 2; *cp; cp++) {
-	if (!isdigit((int) *cp))
+	if (!xo_fix_encoding_char(*cp))
 	    break;
     }
 
@@ -5113,40 +4937,40 @@ xo_add_filter (xo_handle_t *xop UNUSED, const char *input UNUSED)
 }
 
 /*
- * Return TRUE when the current output position is permanently
- * filtered out.  An active filter has determined that no content
- * generated here can ever appear in the final output.  Callers can
- * use this to skip expensive computation before calling xo_emit:
+ * Return TRUE when output at the current position will reach the final
+ * output: either filtering is not active, or the active filter has not
+ * permanently discarded this position.  Callers can use this to skip
+ * expensive computation before calling xo_emit:
  *
  *     xo_open_container("foo");
- *     if (!xo_discarding_output()) {
+ *     if (xo_is_emitting()) {
  *         ... expensive work ...
  *         xo_emit("{:field/...}", value);
  *     }
  *     xo_close_container("foo");
  *
- * Returns FALSE (proceed normally) when filtering is disabled, when
- * no filter is loaded, or when the status is anything other than DEAD
- * (including TRACK and PRED, which still need key and predicate
- * fields to resolve matches).
+ * Returns FALSE only when the filter status is DEAD (XO_STATUS_DEAD).
+ * Returns TRUE when filtering is disabled, when no filter is loaded,
+ * or when the status is TRACK or PRED (which still need key and
+ * predicate fields to resolve matches).
  */
 int
-xo_discarding_output_h (xo_handle_t *xop UNUSED)
+xo_is_emitting_h (xo_handle_t *xop UNUSED)
 {
 #ifdef LIBXO_NEED_FILTERS
     xop = xo_default(xop);
     if (!XOIF_ISSET(xop, XOIF_FILTERING))
-	return FALSE;
-    return xo_stack_cur(xop)->xs_fstatus == XO_STATUS_DEAD;
+	return TRUE;
+    return xo_stack_cur(xop)->xs_fstatus != XO_STATUS_DEAD;
 #else /* LIBXO_NEED_FILTERS */
-    return FALSE;
+    return TRUE;
 #endif /* LIBXO_NEED_FILTERS */
 }
 
 int
-xo_discarding_output (void)
+xo_is_emitting (void)
 {
-    return xo_discarding_output_h(NULL);
+    return xo_is_emitting_h(NULL);
 }
 
 #if defined(LIBXO_NEED_FILTERS) && defined(LIBXO_DEBUG)
@@ -7642,7 +7466,9 @@ xo_do_emit_fields (xo_handle_t *xop, xo_field_info_t *fields,
 		    xo_parse_t nxpp;
 		    xo_parse_for_handle(xop, &nxpp);
 
-		    unsigned new_max_fields = xo_count_fields(&nxpp, new_fmt);
+		    size_t new_fmt_len;
+		    unsigned new_max_fields
+			= xo_count_fields(&nxpp, new_fmt, &new_fmt_len);
 
 		    if (++new_max_fields < max_fields)
 			new_max_fields = max_fields;
@@ -7653,7 +7479,7 @@ xo_do_emit_fields (xo_handle_t *xop, xo_field_info_t *fields,
 		    bzero(new_fields, sz);
 
 		    if (!xo_parse_fields(&nxpp, new_fields + 1,
-					 new_max_fields, new_fmt)) {
+				 new_max_fields, new_fmt, new_fmt_len)) {
 			gettext_reordered = 0;
 
 			if (!xo_gettext_combine_formats(xop, fmt, new_fmt,
@@ -7767,7 +7593,7 @@ xo_do_emit_fields (xo_handle_t *xop, xo_field_info_t *fields,
  * Parse and emit a set of fields
  */
 static int
-xo_do_emit (xo_handle_t *xop, xo_emit_flags_t flags, const char *fmt)
+xo_do_emit (xo_handle_t *xop, const char *fmt)
 {
     xop->xo_columns = 0;	/* Always reset it */
     xop->xo_errno = errno;	/* Save for "%m" */
@@ -7775,56 +7601,21 @@ xo_do_emit (xo_handle_t *xop, xo_emit_flags_t flags, const char *fmt)
     if (fmt == NULL)
 	return 0;
 
-    /* Don't bother emitting fields is there's we're discarding output */
-    if (xo_discarding_output_h(xop))
+    /* Skip emit work when this position is permanently filtered out */
+    if (!xo_is_emitting_h(xop))
 	return 0;		/* Zero columns emitted */
 
-    unsigned max_fields;
-    xo_field_info_t *fields = NULL;
+    xo_parse_t xpp;
+    xo_parse_for_handle(xop, &xpp);
 
-    /*
-     * Retaining (caching) parsed field information means holding
-     * pointers into the caller's format string, so we can only do it
-     * when the caller explicitly asserts the string is safe to retain
-     * (via XOEF_RETAIN, i.e. xo_emitr() or xo_emit_f(XOEF_RETAIN, ...)).
-     * XOEF_NO_RETAIN and the global XOF_RETAIN_NONE flag can veto it.
-     */
-    if (flags & XOEF_NO_RETAIN) {
-	/* If the "don't retain" flag is on, remove the retain, just in case */
-	flags &= ~XOEF_RETAIN;
+    size_t fmt_len;
+    unsigned max_fields = xo_count_fields(&xpp, fmt, &fmt_len);
 
-    } else if (flags & XOEF_RETAIN) {
-	/* If the user doesn't want to retain, even if the caller does */
-	if (XOF_ISSET(xop, XOF_RETAIN_NONE))
-	    flags &= ~XOEF_RETAIN;
-    }
+    xo_field_info_t fields[max_fields];
+    bzero(fields, max_fields * sizeof(fields[0]));
 
-    /*
-     * Check for 'retain' flag, telling us to retain the field
-     * information.  If we've already saved it, then we can avoid
-     * re-parsing the format string.
-     * Dynamically build formats must tell us that the format is
-     * dynamic using the XOEF_NO_RETAIN flag.
-     */
-    if (!(flags & XOEF_RETAIN)
-	|| xo_retain_find(fmt, &fields, &max_fields) != 0
-	|| fields == NULL) {
-
-	/* Nothing retained; parse the format string */
-	xo_parse_t xpp;
-	xo_parse_for_handle(xop, &xpp);
-	max_fields = xo_count_fields(&xpp, fmt);
-	fields = alloca(max_fields * sizeof(fields[0]));
-	bzero(fields, max_fields * sizeof(fields[0]));
-
-	if (xo_parse_fields(&xpp, fields, max_fields, fmt))
-	    return -1;		/* Warning already displayed */
-
-	if (flags & XOEF_RETAIN) {
-	    /* Retain the info */
-	    xo_retain_add(fmt, fields, max_fields);
-	}
-    }
+    if (xo_parse_fields(&xpp, fields, max_fields, fmt, fmt_len))
+	return -1;		/* Warning already displayed */
 
     return xo_do_emit_fields(xop, fields, max_fields, fmt);
 }
@@ -7833,16 +7624,15 @@ xo_do_emit (xo_handle_t *xop, xo_emit_flags_t flags, const char *fmt)
  * Core of xo_emit_cached: use a pre-parsed const field table when valid.
  * Copies the const table to a mutable stack array (xo_do_emit_fields mutates
  * in place for gettext/fnum finalization).  Falls back to xo_do_emit() on
- * version mismatch or null cache.  flags is passed to xo_do_emit() only on
- * the fallback path (the cached path calls xo_do_emit_fields directly).
+ * version mismatch or null cache.
  */
 static int
-xo_do_emit_cached (xo_handle_t *xop, xo_emit_flags_t flags,
-		   const xo_format_cache_t *fcp, const char *fmt)
+xo_do_emit_cached (xo_handle_t *xop, const xo_format_cache_t *fcp,
+		   const char *fmt)
 {
     if (fcp == NULL || fcp->xfc_fields == NULL
 	    || fcp->xfc_version != XO_EMIT_CACHE_VERSION)
-	return xo_do_emit(xop, flags, fmt);	/* safe fallback: parse at runtime */
+	return xo_do_emit(xop, fmt);	/* safe fallback: parse at runtime */
 
     xop->xo_columns = 0;
     xop->xo_errno = errno;
@@ -7850,7 +7640,7 @@ xo_do_emit_cached (xo_handle_t *xop, xo_emit_flags_t flags,
     if (fmt == NULL)
 	return 0;
 
-    if (xo_discarding_output_h(xop))
+    if (!xo_is_emitting_h(xop))
 	return 0;
 
     unsigned n = fcp->xfc_num_fields;
@@ -7872,7 +7662,7 @@ xo_emit_cached_h (xo_handle_t *xop, const xo_format_cache_t *fcp,
 
     xop = xo_default(xop);
     va_start(xop->xo_vap, fmt);
-    rc = xo_do_emit_cached(xop, 0, fcp, fmt);
+    rc = xo_do_emit_cached(xop, fcp, fmt);
     va_end(xop->xo_vap);
     bzero(&xop->xo_vap, sizeof(xop->xo_vap));
 
@@ -7886,13 +7676,14 @@ xo_emit_cached (const xo_format_cache_t *fcp, const char *fmt, ...)
     ssize_t rc;
 
     va_start(xop->xo_vap, fmt);
-    rc = xo_do_emit_cached(xop, 0, fcp, fmt);
+    rc = xo_do_emit_cached(xop, fcp, fmt);
     va_end(xop->xo_vap);
     bzero(&xop->xo_vap, sizeof(xop->xo_vap));
 
     return rc;
 }
 
+/* Deprecated: equivalent to xo_emit_cached(); retain feature removed */
 xo_ssize_t
 xo_emit_cachedr (const xo_format_cache_t *fcp, const char *fmt, ...)
 {
@@ -7900,7 +7691,7 @@ xo_emit_cachedr (const xo_format_cache_t *fcp, const char *fmt, ...)
     ssize_t rc;
 
     va_start(xop->xo_vap, fmt);
-    rc = xo_do_emit_cached(xop, XOEF_RETAIN, fcp, fmt);
+    rc = xo_do_emit_cached(xop, fcp, fmt);
     va_end(xop->xo_vap);
     bzero(&xop->xo_vap, sizeof(xop->xo_vap));
 
@@ -7915,7 +7706,7 @@ xo_emit_cached_hv (xo_handle_t *xop, const xo_format_cache_t *fcp,
 
     xop = xo_default(xop);
     va_copy(xop->xo_vap, vap);
-    rc = xo_do_emit_cached(xop, 0, fcp, fmt);
+    rc = xo_do_emit_cached(xop, fcp, fmt);
     va_end(xop->xo_vap);
     bzero(&xop->xo_vap, sizeof(xop->xo_vap));
 
@@ -7923,14 +7714,14 @@ xo_emit_cached_hv (xo_handle_t *xop, const xo_format_cache_t *fcp,
 }
 
 xo_ssize_t
-xo_emit_cached_hvf (xo_handle_t *xop, xo_emit_flags_t flags,
+xo_emit_cached_hvf (xo_handle_t *xop, xo_emit_flags_t flags UNUSED,
 		    const xo_format_cache_t *fcp, const char *fmt, va_list vap)
 {
     ssize_t rc;
 
     xop = xo_default(xop);
     va_copy(xop->xo_vap, vap);
-    rc = xo_do_emit_cached(xop, flags, fcp, fmt);
+    rc = xo_do_emit_cached(xop, fcp, fmt);
     va_end(xop->xo_vap);
     bzero(&xop->xo_vap, sizeof(xop->xo_vap));
 
@@ -7938,14 +7729,14 @@ xo_emit_cached_hvf (xo_handle_t *xop, xo_emit_flags_t flags,
 }
 
 xo_ssize_t
-xo_emit_cached_hf (xo_handle_t *xop, xo_emit_flags_t flags,
+xo_emit_cached_hf (xo_handle_t *xop, xo_emit_flags_t flags UNUSED,
 		   const xo_format_cache_t *fcp, const char *fmt, ...)
 {
     ssize_t rc;
 
     xop = xo_default(xop);
     va_start(xop->xo_vap, fmt);
-    rc = xo_do_emit_cached(xop, flags, fcp, fmt);
+    rc = xo_do_emit_cached(xop, fcp, fmt);
     va_end(xop->xo_vap);
     bzero(&xop->xo_vap, sizeof(xop->xo_vap));
 
@@ -7953,14 +7744,14 @@ xo_emit_cached_hf (xo_handle_t *xop, xo_emit_flags_t flags,
 }
 
 xo_ssize_t
-xo_emit_cached_f (xo_emit_flags_t flags, const xo_format_cache_t *fcp,
+xo_emit_cached_f (xo_emit_flags_t flags UNUSED, const xo_format_cache_t *fcp,
 		  const char *fmt, ...)
 {
     xo_handle_t *xop = xo_default(NULL);
     ssize_t rc;
 
     va_start(xop->xo_vap, fmt);
-    rc = xo_do_emit_cached(xop, flags, fcp, fmt);
+    rc = xo_do_emit_cached(xop, fcp, fmt);
     va_end(xop->xo_vap);
     bzero(&xop->xo_vap, sizeof(xop->xo_vap));
 
@@ -7982,12 +7773,14 @@ xo_simplify_format (xo_handle_t *xop, const char *fmt, int with_numbers,
 
     xo_parse_t xpp;
     xo_parse_for_handle(xop, &xpp);
-    unsigned max_fields = xo_count_fields(&xpp, fmt);
+
+    size_t fmt_len;
+    unsigned max_fields = xo_count_fields(&xpp, fmt, &fmt_len);
     xo_field_info_t fields[max_fields];
 
     bzero(fields, max_fields * sizeof(fields[0]));
 
-    if (xo_parse_fields(&xpp, fields, max_fields, fmt))
+    if (xo_parse_fields(&xpp, fields, max_fields, fmt, fmt_len))
 	return NULL;		/* Warning already displayed */
 
     xo_buffer_t xb;
@@ -8009,7 +7802,7 @@ xo_emit_hv (xo_handle_t *xop, const char *fmt, va_list vap)
 
     xop = xo_default(xop);
     va_copy(xop->xo_vap, vap);
-    rc = xo_do_emit(xop, 0, fmt);
+    rc = xo_do_emit(xop, fmt);
     va_end(xop->xo_vap);
     bzero(&xop->xo_vap, sizeof(xop->xo_vap));
 
@@ -8023,7 +7816,7 @@ xo_emit_h (xo_handle_t *xop, const char *fmt, ...)
 
     xop = xo_default(xop);
     va_start(xop->xo_vap, fmt);
-    rc = xo_do_emit(xop, 0, fmt);
+    rc = xo_do_emit(xop, fmt);
     va_end(xop->xo_vap);
     bzero(&xop->xo_vap, sizeof(xop->xo_vap));
 
@@ -8037,13 +7830,14 @@ xo_emit (const char *fmt, ...)
     ssize_t rc;
 
     va_start(xop->xo_vap, fmt);
-    rc = xo_do_emit(xop, 0, fmt);
+    rc = xo_do_emit(xop, fmt);
     va_end(xop->xo_vap);
     bzero(&xop->xo_vap, sizeof(xop->xo_vap));
 
     return rc;
 }
 
+/* Deprecated: equivalent to xo_emit(); retain feature removed */
 xo_ssize_t
 xo_emitr (const char *fmt, ...)
 {
@@ -8051,7 +7845,7 @@ xo_emitr (const char *fmt, ...)
     ssize_t rc;
 
     va_start(xop->xo_vap, fmt);
-    rc = xo_do_emit(xop, XOEF_RETAIN, fmt);
+    rc = xo_do_emit(xop, fmt);
     va_end(xop->xo_vap);
     bzero(&xop->xo_vap, sizeof(xop->xo_vap));
 
@@ -8059,14 +7853,14 @@ xo_emitr (const char *fmt, ...)
 }
 
 xo_ssize_t
-xo_emit_hvf (xo_handle_t *xop, xo_emit_flags_t flags,
+xo_emit_hvf (xo_handle_t *xop, xo_emit_flags_t flags UNUSED,
 	     const char *fmt, va_list vap)
 {
     ssize_t rc;
 
     xop = xo_default(xop);
     va_copy(xop->xo_vap, vap);
-    rc = xo_do_emit(xop, flags, fmt);
+    rc = xo_do_emit(xop, fmt);
     va_end(xop->xo_vap);
     bzero(&xop->xo_vap, sizeof(xop->xo_vap));
 
@@ -8074,13 +7868,14 @@ xo_emit_hvf (xo_handle_t *xop, xo_emit_flags_t flags,
 }
 
 xo_ssize_t
-xo_emit_hf (xo_handle_t *xop, xo_emit_flags_t flags, const char *fmt, ...)
+xo_emit_hf (xo_handle_t *xop, xo_emit_flags_t flags UNUSED,
+	    const char *fmt, ...)
 {
     ssize_t rc;
 
     xop = xo_default(xop);
     va_start(xop->xo_vap, fmt);
-    rc = xo_do_emit(xop, flags, fmt);
+    rc = xo_do_emit(xop, fmt);
     va_end(xop->xo_vap);
     bzero(&xop->xo_vap, sizeof(xop->xo_vap));
 
@@ -8088,13 +7883,13 @@ xo_emit_hf (xo_handle_t *xop, xo_emit_flags_t flags, const char *fmt, ...)
 }
 
 xo_ssize_t
-xo_emit_f (xo_emit_flags_t flags, const char *fmt, ...)
+xo_emit_f (xo_emit_flags_t flags UNUSED, const char *fmt, ...)
 {
     xo_handle_t *xop = xo_default(NULL);
     ssize_t rc;
 
     va_start(xop->xo_vap, fmt);
-    rc = xo_do_emit(xop, flags, fmt);
+    rc = xo_do_emit(xop, fmt);
     va_end(xop->xo_vap);
     bzero(&xop->xo_vap, sizeof(xop->xo_vap));
 

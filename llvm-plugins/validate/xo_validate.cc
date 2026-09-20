@@ -5,7 +5,7 @@
  * ../Copyright file. By downloading, installing, copying, or otherwise
  * using the SOFTWARE, you agree to be bound by the terms of that
  * LICENSE.
- * Phil Shafer, 2025
+ * Phil Shafer, August 2025
  *
  * xo_validate.cc: clang plugin that validates libxo format strings.
  *
@@ -95,12 +95,14 @@ parse_fmt_expect (const char *fmt, unsigned fmtlen)
     while (p < end && (*p == '-' || *p == '+' || *p == ' ' ||
                         *p == '0' || *p == '#' || *p == '\''))
         p++;
+
     /* width */
     if (p < end && *p == '*')
         p++;
     else
         while (p < end && isdigit((unsigned char) *p))
             p++;
+
     /* precision groups */
     while (p < end && *p == '.') {
         p++;
@@ -110,6 +112,7 @@ parse_fmt_expect (const char *fmt, unsigned fmtlen)
             while (p < end && isdigit((unsigned char) *p))
                 p++;
     }
+
     /* length modifiers — skip for coarse check */
     while (p < end && (*p == 'l' || *p == 'h' || *p == 'L' ||
                         *p == 'z' || *p == 't' || *p == 'j' || *p == 'q'))
@@ -290,6 +293,8 @@ fmt_expected_type (ASTContext &C, const char *spec, unsigned len)
             return C.LongDoubleTy;
         return C.DoubleTy;  /* float promotes to double in varargs */
     case 's':
+        if (lm == LM_L)
+            return C.getPointerType(C.WCharTy);
         return C.getPointerType(C.CharTy);
     case 'p':
         return C.VoidPtrTy;
@@ -298,10 +303,12 @@ fmt_expected_type (ASTContext &C, const char *spec, unsigned len)
     }
 }
 
-/* Normalise an integer type to its unsigned equivalent, preserving kind.
- * int→unsigned int, long→unsigned long, long long→unsigned long long, etc.
- * This lets us test "same integer kind ignoring signedness" by comparing
- * the normalised forms of two types. */
+/*
+ * Normalise an integer type to its unsigned equivalent, preserving
+ * kind.  int→unsigned int, long→unsigned long, long long→unsigned
+ * long long, etc.  This lets us test "same integer kind ignoring
+ * signedness" by comparing the normalised forms of two types.
+ */
 static QualType
 to_unsigned (ASTContext &C, QualType t)
 {
@@ -321,12 +328,12 @@ to_unsigned (ASTContext &C, QualType t)
  *  - %p:      any pointer.
  */
 static bool
-type_matches (ASTContext &C, QualType expected, const Expr *arg)
+type_matches (ASTContext &ctxt, QualType expected, const Expr *arg)
 {
     QualType act = arg->getType().getCanonicalType().getUnqualifiedType();
-    QualType e   = expected.getCanonicalType().getUnqualifiedType();
+    QualType exp = expected.getCanonicalType().getUnqualifiedType();
 
-    if (act == e)
+    if (act == exp)
         return true;
 
     /* Resolve enum to its underlying integer type before further checks */
@@ -334,31 +341,68 @@ type_matches (ASTContext &C, QualType expected, const Expr *arg)
         act = ET->getDecl()->getIntegerType()
                  .getCanonicalType().getUnqualifiedType();
     }
-    if (act == e)
+    if (act == exp)
         return true;
 
-    /* Integer: same kind, sign may differ (int↔unsigned int, etc.).
-     * Cross-kind is rejected even when sizes are equal on this platform
-     * (unsigned long ≠ unsigned long long on macOS even though both are 64-bit).
-     * This matches clang's own -Wformat behaviour. */
-    if (e->isIntegerType() && act->isIntegerType())
-        return to_unsigned(C, act) == to_unsigned(C, e);
+    /*
+     * Integers of the same kind, where signed-ness may differ (int
+     * .vs. unsigned int, etc.).  Cross-kind is rejected even when
+     * sizes are equal on this platform (unsigned long != unsigned
+     * long long on macOS even though both are 64-bit).  This matches
+     * clang's own -Wformat behaviour.
+     */
+    if (exp->isIntegerType() && act->isIntegerType())
+        return to_unsigned(ctxt, act) == to_unsigned(ctxt, exp);
 
-    /* %s: any char pointer (char *, const char *, unsigned char *, etc.) */
-    if (e->isPointerType() && e->getPointeeType()->isCharType()) {
-        return act->isPointerType()
-            && act->getPointeeType()->isCharType();
+    /*
+     * Also handle array-to-pointer conversion (T[N] for T*).  Arrays
+     * may not be converted to pointers.
+     */
+    if (exp->isPointerType()) {
+        /* Unwrap pointer types */
+        QualType ap;
+        if (act->isPointerType())
+            ap = act->getPointeeType().getCanonicalType().getUnqualifiedType();
+        else if (act->isArrayType())
+            ap = ctxt.getAsArrayType(act)->getElementType()
+                  .getCanonicalType().getUnqualifiedType();
+        else
+            return false;
+
+        QualType ep = exp->getPointeeType().getCanonicalType()
+	                   .getUnqualifiedType();
+
+        if (ap == ep)
+            return true;
+
+        /* %s/%hs: any char kind (char *, unsigned char *, char[N], …) */
+        if (ep->isCharType() && ap->isCharType())
+            return true;
+
+        /*
+	 * %ls: in C mode the wchar_t typedef resolves to an integer
+         * type (e.g. int on macOS) while ctxt.WCharTy may be a
+         * distinct built-in BuiltinType::WChar_S.  Accept any
+         * same-sized integer as wchar_t.
+	 */
+        if (ep->isWideCharType() && ap->isIntegerType()
+	        && ctxt.getTypeSize(ap) == ctxt.getTypeSize(ep))
+            return true;
+
+        /* %p: void * accepts any pointer-or-array argument */
+        if (ep->isVoidType())
+            return true;
+
+        return false;
     }
 
-    /* %p: any pointer */
-    if (e->isVoidPointerType())
-        return act->isPointerType();
-
-    /* Float: exact canonical type match.
-     * On macOS ARM long double and double are both 64-bit, but they are
-     * distinct types and clang warns when they are mixed. */
-    if (e->isFloatingType() && act->isFloatingType())
-        return act == e;
+    /*
+     * Float: exact canonical type match.  On macOS ARM long double
+     * and double are both 64-bit, but they are distinct types and
+     * clang warns when they are mixed.
+     */
+    if (exp->isFloatingType() && act->isFloatingType())
+        return act == exp;
 
     return false;
 }
