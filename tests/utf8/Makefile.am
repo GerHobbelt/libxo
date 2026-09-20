@@ -112,7 +112,7 @@ $(validate_tests): %.validate-test: $(srcdir)/%.c \
 	    -I${top_srcdir}/libxo -I${top_builddir}/libxo -I${INCLUDEDIR} ${SYSROOT_FLAG} \
 	    -c $< -o $*.validate-test.o > out/$@.make.out 2> out/$@.make.err
 	@$(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=link \
-	    ${LLVM_CLANG} ${CFLAGS} ${SYSROOT_FLAG} \
+	    ${LLVM_CLANG} ${CFLAGS} ${LDADD} ${SYSROOT_FLAG} \
 	    $*.validate-test.o ${LIBXO_LA} \
 	    -o $@
 
@@ -127,7 +127,7 @@ $(pass_tests): %.pass-test: $(srcdir)/%.c \
 	    -I${top_srcdir}/libxo -I${top_builddir}/libxo -I${INCLUDEDIR} ${SYSROOT_FLAG} \
 	    -c $< -o $*.pass-test.o > out/$@.make.out 2> out/$@.make.err
 	@$(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=link \
-	    ${LLVM_CLANG} ${CFLAGS} ${SYSROOT_FLAG} \
+	    ${LLVM_CLANG} ${CFLAGS} ${LDADD} ${SYSROOT_FLAG} \
 	    $*.pass-test.o ${LIBXO_LA} \
 	    -o $@
 

@@ -32,6 +32,10 @@ LIBDIR = ${prefix}/lib
 
 SYSROOT_FLAG = $(if ${SDK_PATH},-isysroot ${SDK_PATH},)
 
+if HAVE_HUMANIZE_NUMBER
+LDADD = -lutil
+endif
+
 CLANG_CMD = ${LLVM_CLANG} \
     ${CFLAGS} \
     -fplugin=${VALIDATE_PLUGIN_PATH} \
@@ -92,7 +96,10 @@ test-validate: ${VALIDATE_PLUGIN}
 	-@(for tc in ${TEST_CASES}; do \
 	    echo "... $$tc ..."; \
 	    ${CLANG_CMD} ${srcdir}/$$tc.c \
-	        > out/$$tc.out 2> out/$$tc.err ; \
+	        > out/$$tc.out 2> out/$$tc.err.raw ; \
+	    ${SED} -e "s/ (aka '[^']*')//" < out/$$tc.err.raw \
+		| ${SED} -E -e "s/              %l+[ud]/             %XXX/" \
+		> out/$$tc.err ; \
 	    ${DIFF} -Nu ${srcdir}/saved/$$tc.out out/$$tc.out ; \
 	    ${DIFF} -Nu ${srcdir}/saved/$$tc.err out/$$tc.err ; \
 	done)
@@ -111,12 +118,12 @@ test-precompile: ${PRECOMPILE_PLUGIN}
 	@${MKDIR} -p out
 	-@(for tc in ${PRECOMPILE_TEST_CASES}; do \
 	    echo "... precompile build $$tc ..."; \
-	    ${CLANG_PLAIN} ${srcdir}/$$tc.c -L${LIBDIR} -Wl,-rpath,${LIBDIR} -lxo \
+	    ${CLANG_PLAIN} ${LDADD} ${srcdir}/$$tc.c -L${LIBDIR} -Wl,-rpath,${LIBDIR} -lxo \
 	        -o out/$$tc.plain \
 	        > out/$$tc.plain.build.out 2> out/$$tc.plain.build.err ; \
 	    ${DIFF} -Nu ${srcdir}/saved/$$tc.plain.build.out out/$$tc.plain.build.out ; \
 	    ${DIFF} -Nu ${srcdir}/saved/$$tc.plain.build.err out/$$tc.plain.build.err ; \
-	    ${CLANG_PASS} ${srcdir}/$$tc.c -L${LIBDIR} -Wl,-rpath,${LIBDIR} -lxo \
+	    ${CLANG_PASS} ${LDADD} ${srcdir}/$$tc.c -L${LIBDIR} -Wl,-rpath,${LIBDIR} -lxo \
 	        -o out/$$tc.pass \
 	        > out/$$tc.pass.build.out 2> out/$$tc.pass.build.err ; \
 	    ${DIFF} -Nu ${srcdir}/saved/$$tc.pass.build.out out/$$tc.pass.build.out ; \

@@ -27,7 +27,7 @@ XO_PRECOMPILE_OPTS="\
 -fpass-plugin=${XO_LLVMDIR}/xo_precompile.so \
 "
 
-local msg="need 'full', 'validate' or 'precompile'"
+msg="need 'full', 'validate' or 'precompile'"
 case "$1" in
     full|both|all)
 	XO_OPTIONS="${XO_VALIDATE_OPTS} ${XO_PRECOMPILE_OPTS}"
@@ -42,16 +42,19 @@ case "$1" in
 	shift
 	;;
     -*|*.c)
-	echo "xxcc: missing verb; $msg"
+	echo "xocc: missing verb; $msg"
 	exit 1
 	;;
     *)
-	echo "xxcc: unknown verb '$1'; $msg"
+	echo "xocc: unknown verb '$1'; $msg"
 	exit 1
 	;;
 esac
 
 XO_CC="@CC@ ${XO_OPTIONS}"
+
+# The plugins need to be able to find libxo_format
+export LD_LIBRARY_PATH=${XO_LIBDIR}:${LD_LIBRARY_PATH}
 
 if [ ! -z "${XO_REAL_CC}" ]; then
     # Explictly set implies the user wants our options

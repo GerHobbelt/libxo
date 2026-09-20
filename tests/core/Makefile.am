@@ -145,7 +145,7 @@ test tests: ${noinst_PROGRAMS} run-plain-tests ${PLUGIN_TESTS}
 
 run-plain-tests:
 	@${MKDIR} -p out
-	${RUN_TESTS_CMD} -T "${TEST_FORMATS}" run-bin ${TEST_CASES:.c=.test}
+	@${RUN_TESTS_CMD} -T "${TEST_FORMATS}" run-bin ${TEST_CASES:.c=.test}
 
 if HAVE_VALIDATE
 
@@ -166,7 +166,7 @@ $(validate_tests): %.validate-test: $(srcdir)/%.c \
 	    -I${top_srcdir}/libxo -I${top_builddir}/libxo -I${INCLUDEDIR} ${SYSROOT_FLAG} \
 	    -c $< -o $*.validate-test.o > out/$@.make.out 2> out/$@.make.err
 	@$(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=link \
-	    ${LLVM_CLANG} ${CFLAGS} ${SYSROOT_FLAG} \
+	    ${LLVM_CLANG} ${CFLAGS} ${LDADD} ${SYSROOT_FLAG} \
 	    $*.validate-test.o ${LIBXO_LA} \
 	    -o $@
 
@@ -181,7 +181,7 @@ $(pass_tests): %.pass-test: $(srcdir)/%.c \
 	    -I${top_srcdir}/libxo -I${top_builddir}/libxo -I${INCLUDEDIR} ${SYSROOT_FLAG} \
 	    -c $< -o $*.pass-test.o > out/$@.make.out 2> out/$@.make.err
 	@$(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=link \
-	    ${LLVM_CLANG} ${CFLAGS} ${SYSROOT_FLAG} \
+	    ${LLVM_CLANG} ${CFLAGS} ${LDADD} ${SYSROOT_FLAG} \
 	    $*.pass-test.o ${LIBXO_LA} \
 	    -o $@
 
@@ -218,7 +218,7 @@ endif
 # Run a single test/format for quick iteration:
 #   make one TEST_BIN=test_01.test TEST_FMT=JP
 one:
-	${RUN_TESTS_CMD} -T "${TEST_FMT:-T}" run-bin ${TEST_BIN:-test_01.test}
+	@${RUN_TESTS_CMD} -T "${TEST_FMT:-T}" run-bin ${TEST_BIN:-test_01.test}
 
 accept:
 	@${MKDIR} -p ${srcdir}/saved
