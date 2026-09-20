@@ -2144,7 +2144,9 @@ xo_failure_filter (xo_handle_t *xop, const char *fmt, ...)
     va_end(vap);
 }
 
-/* Error callback bridging xo_parse_t errors to xo_failure() */
+/*
+ * Error callback bridging xo_parse_t errors to xo_failure()
+ */
 static void
 xo_parse_fail_cb (void *data, const char *fmt, va_list vap)
 {
@@ -2162,6 +2164,8 @@ xo_parse_for_handle (xo_handle_t *xop, xo_parse_t *xpp)
     xpp->xp_free = xo_free;
     xpp->xp_error = xo_parse_fail_cb;
     xpp->xp_error_data = xop;
+    xpp->xp_warn = xo_parse_fail_cb;
+    xpp->xp_warn_data = xop;
 }
 
 /**
@@ -5921,6 +5925,18 @@ xo_format_value_json (xo_handle_t *xop, const char *name, ssize_t nlen,
 	flen = strlen(fmt);
     }
 
+    /*
+     * If we are emitting a field at the top level with XOF_NO_TOP cleared
+     * (e.g. --top-wrap without any container), the top-level "{" may not
+     * have been emitted yet.  Emit it now, mirroring the same guard in
+     * xo_do_open_container and xo_do_open_list.
+     */
+    if (!XOF_ISSET(xop, XOF_NO_TOP) && !XOIF_ISSET(xop, XOIF_TOP_EMITTED)) {
+	const char *ppn = XOF_ISSET(xop, XOF_PRETTY) ? "\n" : "";
+	xo_printf(xop, "%*s{%s", xo_indent(xop), "", ppn);
+	XOIF_SET(xop, XOIF_TOP_EMITTED);
+    }
+
     xo_stack_set_flags(xop);
 
     int first = (xop->xo_stack[xop->xo_depth].xs_flags & XSF_NOT_FIRST)
@@ -6244,6 +6260,18 @@ xo_format_value (xo_handle_t *xop, const char *name, ssize_t nlen,
 
     case XO_STYLE_JSON:
 	if (XOF_ISSET(xop, XOF_FILTER)) {
+	    /*
+	     * Emit the top-level "{" before capturing json_start so that
+	     * a later rollback (xo_buf_set_offset to json_start) cannot
+	     * erase it.  xo_format_value_json has the same guard but fires
+	     * after json_start is saved, making it subject to rollback.
+	     */
+	    if (!XOF_ISSET(xop, XOF_NO_TOP) && !XOIF_ISSET(xop, XOIF_TOP_EMITTED)) {
+		const char *ppn = XOF_ISSET(xop, XOF_PRETTY) ? "\n" : "";
+		xo_printf(xop, "%*s{%s", xo_indent(xop), "", ppn);
+		XOIF_SET(xop, XOIF_TOP_EMITTED);
+	    }
+
 	    xo_off_t json_start = xo_buf_offset(&xop->xo_data);
 	    xo_xsf_flags_t saved_not_first =
 		xop->xo_stack[xop->xo_depth].xs_flags & XSF_NOT_FIRST;

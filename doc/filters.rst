@@ -41,6 +41,32 @@ for content to be selected.  Expressions contain five constructs:
       element, which are themselves under a `chapter` element, which
       in turn must be under a `doc` element.
 
+- Negate elements
+
+  - Select nodes not to emit
+
+    - Example: !remote
+    - Select all node except `remote` and its descendants
+
+- Wildcard elements
+
+  - Select any nodes.  A "*" matches any element.
+
+    - Example: one/*/three
+    - Select any `three` elements that are under an element of any
+      name, which in turn must be under a `one` element .
+
+- Relative and absolute paths
+
+  - A path with a leading slash is "anchored" at the root of the
+    output tree, while one without matches anywhere in the output
+    hierarchy.
+
+    - Example: /one/two and one/two
+    - The former matches any `two` elements under a root-level `one`
+      element, while the latter matches any `two` elements under a
+      `one` element anywhere in the tree.
+
 - Predicate tests
 
   - Selects nodes for which the expression in the square brackets
@@ -55,6 +81,16 @@ for content to be selected.  Expressions contain five constructs:
     - Example chapter[@number == 1]
     - Selects all `chapter` elements which have a `number` attribute with
       a value of 1.
+
+  - Can perform math using addition ("+"), subtraction ("-"),
+    multiplication ("*") , and division ("div") and comparisons using
+    equals ("=" or "=="), greater than (">"), greater than or equal
+    (">="), less than ("<"), less than or equal ("<=").  Comparisons
+    allow type forcing when the types are unequal.
+
+    - Example: item[cost * count >= 1500]
+    - Selects any `item` element where the product of their `cost` and
+      `count` elements are greater than or equal to 1500.
 
   - Can be applied to any path member
 
@@ -245,7 +281,7 @@ Among the unimplemented features are:
 - node tests: comment(), text(), node(), and processing-instruction();
   not needed in this context.
 - id() and key(); not needed in this context.
-- "//" (descendent); requires additional buffering.
+- "//" (descendant); requires additional buffering.
 - nested predicates (predicates with predicates); complexity issues.
 - predicate paths (deep paths in predicates); requires additional buffering.
 
@@ -320,6 +356,7 @@ String functions:
 ========================== ==================================================
  concat(s1, s2, ...)        Concatenates strings
  contains(str, sub)         True when *str* contains *sub* as a substring
+ ends-with(str, suffix)     True when *str* ends with *suffix*
  normalize-space(str)       Strips leading/trailing space and collapses runs
  starts-with(str, prefix)   True when *str* begins with *prefix*
  string-length(str)         Returns the length of *str*
@@ -433,9 +470,6 @@ Quote the expression appropriately for the shell being used::
     # tcsh
     my-app --libxo 'filter=socket[tcp-state=="ESTABLISHED"]'
 
-    # pass via environment variable to avoid quoting issues
-    LIBXO_OPTIONS='filter=socket[tcp-state=="ESTABLISHED"]' my-app
-
 Commas are particularly awkward since they are used for two purposes:
 the separate libxo options (e.g. "warn,pretty") as well as separate
 arguments in filter function arguments (e.g. "start-with(one, two)").
@@ -500,3 +534,24 @@ command-line option::
     my-app: invalid number value: 'tcp-state'
 
 This message will be repeated on each conversion error.
+
+The "fdr" Encoder
+-----------------
+
+Filters are complex expressions, and the software that implements them
+is also complex.  Despite the efforts of the author, it is possible
+that expressions could be used that were not considered, tested, or
+implemented.  In many cases, the setup required to support the failing
+situation may not be something that can be shared to allow debugging.
+To allow such debugging, an encoder named "fdr" (after the aviation
+industry's "flight data recorder") allows the recording of the specific
+output tags being passed to the filter software, making reproducing
+problems trivial.  In addition, these failing cases can be added to
+the test suite to ensure the quality of future releases.
+
+To use the FDR, just add `--libxo @fdr` to your command line and
+redirect output to a file suitable for submission.  As normal, all
+`--libxo` options must appear before any other options or arguments.
+
+Please be extremely careful to ensure no secret or sensitive data
+appears in this output before submitting it as a bug attachment.

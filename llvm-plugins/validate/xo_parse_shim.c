@@ -14,6 +14,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <ctype.h>
+#include <string.h>
 
 #include "xo_format.h"
 #include "xo_parse_shim.h"
@@ -72,6 +74,17 @@ shim_error_cb (void *data, const char *fmt, va_list vap)
     ss->error(ss->data, buf);
 }
 
+static void
+shim_warn_cb (void *data, const char *fmt, va_list vap)
+{
+    struct xo_shim_state *ss = data;
+    if (ss->error == NULL)
+        return;
+    char buf[512];
+    vsnprintf(buf, sizeof(buf), fmt, vap);
+    ss->error(ss->data, buf);
+}
+
 int
 xo_shim_parse (const char *fmt, xo_shim_error_t error, void *data)
 {
@@ -79,11 +92,67 @@ xo_shim_parse (const char *fmt, xo_shim_error_t error, void *data)
     xo_parse_t xpp = { 0 };
     xpp.xp_error      = shim_error_cb;
     xpp.xp_error_data = &ss;
+    xpp.xp_warn       = shim_warn_cb;
+    xpp.xp_warn_data = &ss;
     xpp.xp_flags      = XPF_STRICT;
 
     int rc = xo_parse_format(&xpp, fmt);
     xo_parse_release(&xpp);
     return rc;
+}
+
+/*
+ * Scan a printf-style format string of length flen for %...conv sequences
+ * and call arg_cb once per conversion.  %% is skipped (not a va_arg).
+ * Fields with no % spec produce zero calls, correctly handling static content
+ * like "{:type/ethernet}".  Fields with multiple specs like "%s-%s-%s" produce
+ * one call per spec, correctly handling cases like "{:name/%s-%s-%s}".
+ */
+static void
+scan_format_args (const char *field_fmt, unsigned flen,
+                  xo_shim_arg_cb_t arg_cb, void *arg_data)
+{
+    const char *p = field_fmt, *end = field_fmt + flen;
+
+    while (p < end) {
+        if (*p != '%') { p++; continue; }
+        const char *spec = p++;
+        if (p >= end) break;
+        if (*p == '%') { p++; continue; }  /* literal %% */
+
+        /* flags */
+        while (p < end && (*p == '-' || *p == '+' || *p == ' ' ||
+                            *p == '0' || *p == '#' || *p == '\''))
+            p++;
+        /* width: digits or '*' (the '*' consumes one int va_arg) */
+        if (p < end && *p == '*') {
+            arg_cb(arg_data, "%d", 2);
+            p++;
+        } else {
+            while (p < end && isdigit((int) (unsigned char) *p))
+                p++;
+        }
+        /* precision */
+        if (p < end && *p == '.') {
+            p++;
+            /* '*' precision also consumes one int va_arg */
+            if (p < end && *p == '*') {
+                arg_cb(arg_data, "%d", 2);
+                p++;
+            } else {
+                while (p < end && isdigit((unsigned char)*p))
+                    p++;
+            }
+        }
+        /* length modifiers */
+        while (p < end && (*p == 'l' || *p == 'h' || *p == 'L' ||
+                            *p == 'z' || *p == 't' || *p == 'j' || *p == 'q'))
+            p++;
+        /* conversion character */
+        if (p < end) p++;
+
+        arg_cb(arg_data, spec, (unsigned)(p - spec));
+    }
 }
 
 /*
@@ -125,12 +194,16 @@ field_consumes_varg (const xo_field_info_t *xfip)
 int
 xo_shim_parse_args (const char *fmt,
                      xo_shim_error_t error_cb, void *error_data,
-                     xo_shim_arg_cb_t arg_cb,   void *arg_data)
+                     xo_shim_error_t warn_cb,  void *warn_data,
+                     xo_shim_arg_cb_t arg_cb,  void *arg_data)
 {
-    struct xo_shim_state ss = { error_cb, error_data };
+    struct xo_shim_state ss_err  = { error_cb, error_data };
+    struct xo_shim_state ss_warn = { warn_cb, warn_data };
     xo_parse_t xpp = { 0 };
     xpp.xp_error      = shim_error_cb;
-    xpp.xp_error_data = &ss;
+    xpp.xp_error_data = &ss_err;
+    xpp.xp_warn       = shim_warn_cb;
+    xpp.xp_warn_data  = &ss_warn;
     xpp.xp_flags      = XPF_STRICT;
 
     if (xo_parse_format(&xpp, fmt) < 0) {
@@ -140,14 +213,28 @@ xo_shim_parse_args (const char *fmt,
 
     for (unsigned i = 0; i < xpp.xp_num_fields; i++) {
         const xo_field_info_t *xfip = &xpp.xp_fields[i];
+        int ftype = (int) xfip->xfi_ftype;
 
         /* XFF_ARGUMENT: field name itself comes from va_arg as const char * */
         if (xfip->xfi_flags & XFF_ARGUMENT)
             arg_cb(arg_data, NULL, 0);
 
+        /* 'a' role: attribute name always comes from va_arg as const char * */
+        if (strchr(XO_FORMAT_MODIFIERS_NEED_STRING, ftype))
+            arg_cb(arg_data, "%s", 2);
+
+        /* Enforce name/format restrictions */
+        if (strchr(XO_FORMAT_ROLES_NEEDING_NAME, ftype) && xfip->xfi_clen == 0)
+            ss_err.error(ss_err.data, "field role requires a non-empty name");
+        if (strchr(XO_FORMAT_ROLES_NO_NAME, ftype) && xfip->xfi_clen != 0)
+            ss_err.error(ss_err.data, "field role must have an empty name");
+        if (strchr(XO_FORMAT_ROLES_NO_FORMAT, ftype) && xfip->xfi_format != XO_FOFF_NONE)
+            ss_err.error(ss_err.data, "field role cannot have a format specifier");
+
         if (field_consumes_varg(xfip))
-            arg_cb(arg_data, xo_foff(fmt, xfip->xfi_format),
-		   (unsigned) xfip->xfi_flen);
+            scan_format_args(xo_foff(fmt, xfip->xfi_format),
+                             (unsigned) xfip->xfi_flen,
+                             arg_cb, arg_data);
     }
 
     xo_parse_release(&xpp);
